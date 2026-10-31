@@ -70,6 +70,7 @@ install -d -m 755 /usr/local/bin ||
 install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate ||
     fail "Failed to install elevate"
 
+
 # Print completion message
 printf '%s\n' '[+] Installation complete; module entry:'
 kldstat -m rootkit
