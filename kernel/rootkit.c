@@ -45,4 +45,3 @@ static moduledata_t rootkit_module = {
 };
 
 DECLARE_MODULE(rootkit, rootkit_module, SI_SUB_DRIVERS, SI_ORDER_MIDDLE);
-MODULE_VERSION(rootkit, 1);
