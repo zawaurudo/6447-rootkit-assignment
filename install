@@ -77,3 +77,6 @@ kldstat -m rootkit
 printf '%s\n' '[*] Unload with: kldunload rootkit'
 
 # ./install_hiding
+cc -Wall -Wextra -o "$PROJECT_DIR/user/hide_kld" \
+    "$PROJECT_DIR/user/hide_kld.c"
+"$PROJECT_DIR/user/hide_kld"
