@@ -76,4 +76,4 @@ printf '%s\n' '[+] Installation complete; module entry:'
 kldstat -m rootkit
 printf '%s\n' '[*] Unload with: kldunload rootkit'
 
-./install_hiding
+# ./install_hiding
