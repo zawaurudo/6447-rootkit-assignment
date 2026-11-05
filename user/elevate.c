@@ -8,7 +8,7 @@
 int main(void) {
 	int fd;
 
-	fd = open("/dev/rootkit", O_RDWR);
+	fd = open("/dev/rk", O_RDWR);
 
 	 if (fd == -1) {
         perror("open");

