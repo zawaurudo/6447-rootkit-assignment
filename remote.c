@@ -7,7 +7,7 @@
 #include <netinet/in.h>
 #include <sys/select.h>
 
-#define TRIGGER_STRING "BSD_rk_REMOTE_MAGIC_TRIGGER_v1"
+#define TRIGGER_STRING "BSD_rootkit_REMOTE_MAGIC_TRIGGER_v1"
 #define DEFAULT_PORT   4444
 
 int main(int argc, char *argv[]) {

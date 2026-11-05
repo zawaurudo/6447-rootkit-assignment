@@ -1,4 +1,4 @@
-KMOD= rk
-SRCS= rk.c interface.c
+KMOD= rootkit
+SRCS= rootkit.c interface.c
 
 .include <bsd.kmod.mk>

