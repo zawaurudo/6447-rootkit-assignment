@@ -79,7 +79,7 @@ fi
 [ -x "$ELEVATE_BIN" ]
 
 # Install binaries to /usr/local/bin
-printf '%s\n' '[*] Installing binaries to /usr/local/bin...'
+# printf '%s\n' '[*] Installing binaries to /usr/local/bin...'
 install -d -m 755 /usr/local/bin 
 install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate 
 install -m 755 "$MODULE_DIR/revshell" /usr/local/bin/revshell 
