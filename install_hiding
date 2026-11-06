@@ -1,0 +1,9 @@
+#!/bin/sh
+pwd
+cd "kernel/hiding"
+make 
+kldload ./hiding.ko
+
+cd ../../user
+clang hide_kld.c -o hide_kld
+./hide_kld
