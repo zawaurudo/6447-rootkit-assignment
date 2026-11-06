@@ -1,4 +1,4 @@
-# FreeBSD Rootkit — Midpoint Design
+# FreeBSD Rootkit - Midpoint Design
 
 ## Architecture
 
@@ -24,7 +24,7 @@ revshell --WAIT_REMOTE, ELEVATE ioctls--> root --TCP callback :4444--> Remote
 
 `elevate` opens `/dev/rootkit` and issues the elevation ioctl handled by `kernel/interface.c`, on success it execs a root shell. Separately, `revshell` opens the device and issues `rootkit_WAIT_REMOTE`, which blocks until the in-kernel UDP listener matches `BSD_rootkit_REMOTE_MAGIC_TRIGGER_v1` and returns the sender's IP. It then issues `rootkit_ELEVATE`, which creates a credential with user IDs 0 and group `wheel`, installs it on the calling process under its process lock, and returns to userland. `revshell` connects to the sender on TCP `4444`, redirects standard input/output/error to that socket, and execs interactive `/bin/sh`.
 
-## Concealment: implementation and detection
+## Concealment
 
 | Name | Mechanism |
 |---|---|
@@ -33,11 +33,11 @@ revshell --WAIT_REMOTE, ELEVATE ioctls--> root --TCP callback :4444--> Remote
 | **TCP PCB-list hiding** | Registered but not invoked by the standard installer. `sys/port_hiding` traverses `V_tcbinfo.ipi_listhead` and attempts to remove TCP PCB entries when the requested port matches a local or foreign port, under the PCB info lock. This directly alters the kernel's TCP control-block list, its effect and safety are unverified and it may disrupt networking. |
 | **Separate prototype** | `hiding/hiding.c` contains similar experimental code, `install_hiding` references a missing `kernel/hiding` path. |
 
-Directory and module-list hiding are intended to alter the corresponding enumeration views without removing the underlying files. Port hiding instead attempts to remove TCP control blocks from a kernel list, its effect and safety are unverified. The main module's unload handler does not restore its `getdirentries` hook. Correlate filesystem/startup artifacts, module and linker state, syscall registrations/handlers, `/dev/rootkit`, processes, and network evidence.
+Directory and module-list hiding are intended to alter the corresponding enumeration views without removing the underlying files. Port hiding instead attempts to remove TCP control blocks from a kernel list. The main module's unload handler does not restore its `getdirentries` hook.
 
-## Bonus work: logging/key capture
+## Logging/key capture
 
-The intended bonus is to capture terminal keystrokes on the target and forward them to the remote receiver. The README describes a TTY hook and a kernel socket sender as work in progress, neither is present in this checkout.
+Capture terminal keystrokes on the target and forward them to the remote receiver. The TTY hook and kernel socket sender are work in progress.
 
 ```text
 Planned target-side TTY capture/sender
@@ -51,7 +51,7 @@ Planned target-side TTY capture/sender
 | `log/log.c` receiver | Implemented separately on the remote host: takes the target IPv4 address as its command-line argument, listens on `0.0.0.0:9999`, accepts connections only from that address, appends received bytes to `exfil.log`, and prints them to stdout. |
 | Target-side TTY capture and sender | Planned/WIP |
 
-## Detection checklist
+## Summary
 
 ```text
 Files/startup:  /boot/modules/rootkit.ko, kld_list, /dev/rootkit,
