@@ -1,0 +1,3 @@
+#!/bin/sh
+
+tar -cvf rootkit.tar kernel user elevate install remote.c remote
