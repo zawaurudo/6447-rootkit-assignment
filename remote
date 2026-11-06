@@ -1,0 +1,4 @@
+#!/bin/sh
+
+IP="$1"
+cc -Wall -Wextra -o remote remote.c && ./remote "$IP"

