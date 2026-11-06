@@ -16,4 +16,8 @@
 int make_rootkit_dev(void);
 void destroy_rootkit_dev(void);
 
-#endif /* INTERFACE_H */
+// void init_keylogger(void);
+// void cleanup_keylogger(void);
+
+#endif
+

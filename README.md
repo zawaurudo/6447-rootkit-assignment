@@ -16,6 +16,12 @@
 - the user programs such as elevate.c are then compiled and installed into /usr/local/bin which allows it to remain available even after reboot
 - the user program hide_kld.c is also compiled, and persistence is maintained through /etc/rc.local, which runs this script again after each reboot
 
+# LOG
+- the log component acts as the external receiver running entirely on the attacker/host machine ($REMOTE), rather than inside the infected freebsd kernel
+- it takes the target machine's IP address as a command line argument and binds a listening port to wait for incoming connections
+- the rootkit (sender) deployed on $TARGET hooks the tty to capture keystrokes, opens a kernel socket, and sends that exfiltrated data across the network
+- once the connection is established, this remote log program simply ingests the stream of captured keystrokes in real-time and logs them to the terminal
+- STATUS: the remote receiver (log.c) is fully implemented, merged, and tested locally. the kernel sender (tty hook & kernel socket) is currently a work in progress and will be finalized this weekend.
 
 # ELEVATE
 - elevate is split between a user and kernel program

