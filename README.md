@@ -79,18 +79,18 @@
 
 # Pack inside FreeBSD
 - tar -xf 6447-rootkit-assignment-main.zip     
-# bsdtar reads zip; no -z for zip
+-bsdtar reads zip; no -z for zip
 - cd 6447-rootkit-assignment-main
 - chmod 755 install elevate log remote
 - ./create_submission_tarball                  
-# writes rootkit.tar with 755 baked into the archive
+-writes rootkit.tar with 755 baked into the archive
 
 # Verification before handing it in
 - tar -tvf rootkit.tar | grep -E 'install|elevate|log$|remote$'
-- all four lines must start with -rwxr-xr-x
+  all four lines must start with -rwxr-xr-x
 
 - tar -tf rootkit.tar | head -5
-- install / elevate / log / remote must be at the top level, not nested in a folder
+-install / elevate / log / remote must be at the top level, not nested in a folder
 
 - ./log 127.0.0.1 9999 /tmp/x.log
-- on REMOTE: prints "collector: port 9999, any peer, appending to /tmp/x.log"
+-on REMOTE: prints "collector: port 9999, any peer, appending to /tmp/x.log"
