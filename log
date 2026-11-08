@@ -1,0 +1,38 @@
+#!/bin/sh
+#
+# ./log <TARGET_IP> [PORT] [LOGFILE] [-f]
+#
+# Runs on $REMOTE. The collector itself is plain C so it can live in the
+# archive as source; this wrapper compiles it into $TMPDIR and execs the
+# result, which keeps ./log working on a machine where nothing was
+# pre-installed (FreeBSD base always ships cc).
+#
+# It rebuilds on every invocation instead of caching by timestamp: tar
+# restores the mtimes of the archive members, so a binary left over from an
+# older extraction can look newer than the source it was built from. The
+# binary name carries the PID, because compiling over a copy that is still
+# running fails with ETXTBSY.
+
+set -eu
+
+DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+SRC="$DIR/logsrc/collector.c"
+
+[ -f "$SRC" ] || { echo "log: missing $SRC" >&2; exit 1; }
+
+CC=""
+for candidate in cc clang gcc; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+        CC="$candidate"
+        break
+    fi
+done
+[ -n "$CC" ] || { echo "log: no C compiler found (tried cc, clang, gcc)" >&2; exit 1; }
+
+BIN="${TMPDIR:-/tmp}/rkcollector.$$"
+trap 'rm -f "$BIN"' EXIT HUP INT TERM
+
+"$CC" -O2 -Wall -Wextra -o "$BIN" "$SRC" || { echo "log: build failed" >&2; exit 1; }
+
+trap - EXIT HUP INT TERM
+exec "$BIN" "$@"
