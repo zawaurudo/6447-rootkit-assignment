@@ -73,7 +73,7 @@
 - kld_list adds the rootkit module to its list of modules loaded upon startup
 - a persistence directory and file are installed upon running install and the rootkit is copied to /boot/modules which makes it available even after freebsd is rebooted and the original project directory is removed
 - from there, the rootkit kernel module is added to kld_list in /etc/rc.conf using sysrc, and kldload loads the persistence copy 
- - finally, on reboot, freebsd will read the list of modules from /boot/modules and load rootkit.ko without having to initialise or run install again, and the rootkit's MOD_LOAD handler will ensure that /dev/rootkit is remade, so no functionality (i.e. log, elevate) is lost
+- finally, on reboot, freebsd will read the list of modules from /boot/modules and load rootkit.ko without having to initialise or run install again, and the rootkit's MOD_LOAD handler will ensure that /dev/rootkit is remade, so no functionality (i.e. log, elevate) is lost
 - since hide_kld isn't run again, a new script is added to install to ensure that it will automatically run, which uses /etc/rc.local, allowing for custom commands to be run at the end when booting (this is necessary, because once hide_kld is run, the rootkit kernel module will no longer be visible)
 - absolute path is necessary because on reboot, the proejct directory name will disappear. using absolute path will allow the kernel to find it again even while the working directory is unknown
 
