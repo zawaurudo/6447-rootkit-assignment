@@ -76,3 +76,19 @@
  - finally, on reboot, freebsd will read the list of modules from /boot/modules and load rootkit.ko without having to initialise or run install again, and the rootkit's MOD_LOAD handler will ensure that /dev/rootkit is remade, so no functionality (i.e. log, elevate) is lost
 - since hide_kld isn't run again, a new script is added to install to ensure that it will automatically run, which uses /etc/rc.local, allowing for custom commands to be run at the end when booting (this is necessary, because once hide_kld is run, the rootkit kernel module will no longer be visible)
 - absolute path is necessary because on reboot, the proejct directory name will disappear. using absolute path will allow the kernel to find it again even while the working directory is unknown
+
+# A. Pack inside FreeBSD (recommended)
+tar -xf 6447-rootkit-assignment-main.zip     # bsdtar reads zip; no -z for zip
+cd 6447-rootkit-assignment-main
+chmod 755 install elevate log remote
+./create_submission_tarball                  # writes rootkit.tar with 755 baked into the archive
+
+Verification before handing it in:
+tar -tvf rootkit.tar | grep -E 'install|elevate|log$|remote$'
+# all four lines must start with -rwxr-xr-x
+
+tar -tf rootkit.tar | head -5
+# install / elevate / log / remote must be at the top level, not nested in a folder
+
+./log 127.0.0.1 9999 /tmp/x.log
+# on REMOTE: prints "collector: port 9999, any peer, appending to /tmp/x.log"
