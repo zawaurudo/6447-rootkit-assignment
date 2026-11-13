@@ -4,21 +4,21 @@ setup.sh
 bds_freebsd
 
 # kernel module build products
-kernel/*.o
-kernel/*.ko
-kernel/.depend*
-kernel/vnode_if*.h
-kernel/export_syms
-kernel/machine
-kernel/x86
-kernel/i386
-hiding/*.o
-hiding/*.ko
-hiding/machine
-hiding/x86
-hiding/i386
+rootkit/kernel/*.o
+rootkit/kernel/*.ko
+rootkit/kernel/.depend*
+rootkit/kernel/vnode_if*.h
+rootkit/kernel/export_syms
+rootkit/kernel/machine
+rootkit/kernel/x86
+rootkit/kernel/i386
+rootkit/hiding/*.o
+rootkit/hiding/*.ko
+rootkit/hiding/machine
+rootkit/hiding/x86
+rootkit/hiding/i386
 
 # userland build products
-user/elevate
-user/hide_kld
-kernel/revshell
+rootkit/user/elevate
+rootkit/user/hide_kld
+rootkit/kernel/revshell
