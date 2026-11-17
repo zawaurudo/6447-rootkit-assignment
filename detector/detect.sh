@@ -20,7 +20,6 @@
 #
 # Always exits 0. A detector that exits non-zero on a clean host is a false
 # positive with extra steps.
-
 set -u
 
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
