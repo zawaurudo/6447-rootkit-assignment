@@ -89,20 +89,20 @@ int check_syscalls() {
         {.syscall_name = "sys_fexecve",         .syscall_num = SYS_fexecve},
         {.syscall_name = "sys_open",            .syscall_num = SYS_open},
         {.syscall_name = "sys_openat",          .syscall_num = SYS_openat},
-        {.syscall_name = "sys_read",            .syscall_num = SYS_read}, // sys_read
-        {.syscall_name = "sys_write",           .syscall_num = SYS_write}, // sys_write
-        {.syscall_name = "sys_ptrace",          .syscall_num = SYS_ptrace}, // sys_ptrace
-        {.syscall_name = "sys_kldload",          .syscall_num = SYS_kldload},// sys_kldload
-        {.syscall_name = "sys_kldunload",          .syscall_num = SYS_kldunload}, // sys_kldunload
-        {.syscall_name = "sys_kldstat",          .syscall_num = SYS_kldstat},// sys_kldstat
-        {.syscall_name = "sys_kldnext",          .syscall_num = SYS_kldnext}, // sys_kldnext
-        {.syscall_name = "sys_setuid",          .syscall_num = SYS_setuid}, // sys_setuid
-        {.syscall_name = "sys_seteuid",          .syscall_num = SYS_seteuid}, // sys_seteuid
-        {.syscall_name = "sys_bind",          .syscall_num = SYS_bind}, // sys_bind
-        {.syscall_name = "sys_accept",          .syscall_num = SYS_accept}, // sys_accept
-        {.syscall_name = "sys_connect",          .syscall_num = SYS_connect}, // sys_connect
-        {.syscall_name = "sys_recvfrom",          .syscall_num = SYS_recvfrom}, // sys_recvfrom
-        {.syscall_name = "sys_recvmsg",          .syscall_num = SYS_recvmsg}, // sys_recvmsg
+        {.syscall_name = "sys_read",            .syscall_num = SYS_read},
+        {.syscall_name = "sys_write",           .syscall_num = SYS_write},
+        {.syscall_name = "sys_ptrace",          .syscall_num = SYS_ptrace},
+        {.syscall_name = "sys_kldload",         .syscall_num = SYS_kldload}
+        {.syscall_name = "sys_kldunload",       .syscall_num = SYS_kldunload},
+        {.syscall_name = "sys_kldstat",         .syscall_num = SYS_kldstat}
+        {.syscall_name = "sys_kldnext",         .syscall_num = SYS_kldnext},
+        {.syscall_name = "sys_setuid",          .syscall_num = SYS_setuid},
+        {.syscall_name = "sys_seteuid",         .syscall_num = SYS_seteuid},
+        {.syscall_name = "sys_bind",            .syscall_num = SYS_bind},
+        {.syscall_name = "sys_accept",          .syscall_num = SYS_accept},
+        {.syscall_name = "sys_connect",         .syscall_num = SYS_connect},
+        {.syscall_name = "sys_recvfrom",        .syscall_num = SYS_recvfrom},
+        {.syscall_name = "sys_recvmsg",         .syscall_num = SYS_recvmsg},
     };
     int flag = 0;
     for (int i = 0; i < SYSCALLS_SIZE; i++) {
