@@ -1,4 +1,4 @@
-##!/bin/sh
+#!/bin/sh
 # Userland half of my two areas: kernel modules and the network side.
 #
 # Nothing here claims a detection. Everything this script can see arrives
@@ -20,8 +20,7 @@
 #
 # Always exits 0. A detector that exits non-zero on a clean host is a false
 # positive with extra steps.
-#!/usr/bin/env bash
-set -euo pipefail
+
 set -u
 
 PATH=/sbin:/usr/sbin:/bin:/usr/bin
