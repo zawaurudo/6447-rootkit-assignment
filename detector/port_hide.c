@@ -14,11 +14,6 @@
  *   ./port_hide <port>          look up sys/port_hiding and call it
  *   ./port_hide <port> <nr>     skip the lookup, use syscall <nr>
  *
- * What it does to the kernel, for the write-up: port_hiding() walks
- * V_tcbinfo.ipi_listhead and CK_LIST_REMOVE()s every pcb whose local or foreign
- * port matches. No in_pcbdrop(), no free, hash table untouched. So ipi_count
- * stays one ahead of the list for good, which is the delta the detector wants
- * to see on three consecutive samples.
  */
 
 #include <errno.h>
