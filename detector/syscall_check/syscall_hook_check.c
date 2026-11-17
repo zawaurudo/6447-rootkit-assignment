@@ -22,10 +22,7 @@ int check_syscalls();
 int
 main(int argc, char *argv[])
 {
-    if (check_syscalls()) {
-        return 1;
-    }
-    exit(0);
+    return check_syscalls();
 }
 
 int 
