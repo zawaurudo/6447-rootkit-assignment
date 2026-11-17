@@ -39,8 +39,6 @@ detect_syscall_hook(char *syscall_name, int syscall_num) {
     nl[1].n_name = syscall_name;
     callnum = syscall_num;
 
-    // printf("Checking system call %d: %s\n\n", callnum, syscall_name);
-
     kd = kvm_openfiles(NULL, NULL, NULL, O_RDWR, errbuf);
     if (!kd) {
         fprintf(stderr, "ERROR: %s\n", errbuf);
