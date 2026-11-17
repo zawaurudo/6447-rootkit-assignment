@@ -9,14 +9,27 @@
 #include <sys/sysent.h>
 #include <sys/syscall.h>
 
-void usage();
+#define SYSCALLS_SIZE 23
 
 struct syscall_info {
     char *syscall_name;
     int syscall_num;
 };
 
-int detect_syscall_hook(char *syscall_name, int syscall_num) {
+int detect_syscall_hook(char *syscall_name, int syscall_num);
+int check_syscalls();
+
+int
+main(int argc, char *argv[])
+{
+    if (check_syscalls()) {
+        return 1;
+    }
+    exit(0);
+}
+
+int 
+detect_syscall_hook(char *syscall_name, int syscall_num) {
     char errbuf[_POSIX2_LINE_MAX];
     kvm_t *kd;
     struct nlist nl[] = { { NULL }, { NULL }, { NULL }, };
@@ -77,8 +90,9 @@ int detect_syscall_hook(char *syscall_name, int syscall_num) {
     }
     return 0;
 }
-#define SYSCALLS_SIZE 23
-int check_syscalls() {
+
+int 
+check_syscalls() {
     struct syscall_info syscalls[SYSCALLS_SIZE] = {
         {.syscall_name = "sys_exit",            .syscall_num = SYS_exit},
         {.syscall_name = "sys_getdirentries",   .syscall_num = SYS_getdirentries},
@@ -118,22 +132,4 @@ int check_syscalls() {
     }
 
     return flag;
-}
-
-int
-main(int argc, char *argv[])
-{
-    if (check_syscalls()) {
-        return 1;
-    }
-    exit(0);
-}
-
-void
-usage()
-{
-    fprintf(stderr,"Usage:\ncheckcall [system call function] "
-        "[call number] <fix>\n\n");
-    fprintf(stderr, "For a list of system call numbers see "
-        "/sys/sys/syscall.h\n");
 }
