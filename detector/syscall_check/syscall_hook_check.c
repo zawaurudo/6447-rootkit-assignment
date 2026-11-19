@@ -9,7 +9,7 @@
 #include <sys/sysent.h>
 #include <sys/syscall.h>
 
-#define SYSCALLS_SIZE 23
+#define SYSCALLS_SIZE 24
 
 struct syscall_info {
     char *syscall_name;
@@ -101,9 +101,9 @@ check_syscalls() {
         {.syscall_name = "sys_read",            .syscall_num = SYS_read},
         {.syscall_name = "sys_write",           .syscall_num = SYS_write},
         {.syscall_name = "sys_ptrace",          .syscall_num = SYS_ptrace},
-        {.syscall_name = "sys_kldload",         .syscall_num = SYS_kldload}
+        {.syscall_name = "sys_kldload",         .syscall_num = SYS_kldload},
         {.syscall_name = "sys_kldunload",       .syscall_num = SYS_kldunload},
-        {.syscall_name = "sys_kldstat",         .syscall_num = SYS_kldstat}
+        {.syscall_name = "sys_kldstat",         .syscall_num = SYS_kldstat},
         {.syscall_name = "sys_kldnext",         .syscall_num = SYS_kldnext},
         {.syscall_name = "sys_setuid",          .syscall_num = SYS_setuid},
         {.syscall_name = "sys_seteuid",         .syscall_num = SYS_seteuid},
@@ -112,6 +112,7 @@ check_syscalls() {
         {.syscall_name = "sys_connect",         .syscall_num = SYS_connect},
         {.syscall_name = "sys_recvfrom",        .syscall_num = SYS_recvfrom},
         {.syscall_name = "sys_recvmsg",         .syscall_num = SYS_recvmsg},
+        {.syscall_name = "sys_fstatat",         .syscall_num = SYS_fstatat}
     };
     int flag = 0;
     for (int i = 0; i < SYSCALLS_SIZE; i++) {
