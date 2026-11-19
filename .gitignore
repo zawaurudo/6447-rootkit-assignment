@@ -22,3 +22,5 @@ rootkit/hiding/i386
 rootkit/user/elevate
 rootkit/user/hide_kld
 rootkit/kernel/revshell
+exfil.log
+remote_bin

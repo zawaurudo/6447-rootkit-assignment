@@ -27,6 +27,12 @@
 - A new system call is added to allow user to detach the module with the name given by the user.
 - In the system call, the modules list is traversed and when the module with the name is found, it is removed from the list. The similar is also done with the list of linker files.
 - Since these are global kernel data, when accessing it, the required locks are needed to be acquired to maintain the synchronisation.
+
+5. Hiding process
+- Processes are tracked in a doubly-linked list called `allproc` managed in `proc.h`. The commands that are used to fetch information about processes show the information based on that list of proccesses.
+- The entries of the list are of the type `struct proc` to store the details around a process such as pid, p_flag, p_state, etc. 
+- So to hide the process, firstly, it needs to be removed from the list of processes. The unique key of a process is the pid, so just need to have a loop to go through entries in that list and remove the process that matches the pid.
+- For efficiency purpose, the processes are also stored on a hash table named `pidhashbtl`. Even though the process was removed in the main list of processes, when querying information, the hash table is still in use. Therefore, the process also needs to be removed in the hash table of processes.
 # CHANGES MADE (JUST TO LET EVERYONE KNOW):
 1. REMOVED PRINTING OF MESSAGES FROM INSTALL
 2. UPDATED HIDE_KLD COMPILATION 
