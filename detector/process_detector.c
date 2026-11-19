@@ -48,13 +48,9 @@ static int is_sus_name(const char *name) {
 }
 
 static void
-report_sus_process(int pid, const char *name, const char *reason)
+report_sus_process(int pid, const char *reason)
 {
-    if (name != NULL)
-        printf("[!] Suspicious process: PID %d name=%s (%s)\n",
-            pid, name, reason);
-    else
-        printf("[!] Suspicious process: PID %d (%s)\n", pid, reason);
+    printf("[!] Suspicious process: PID %d (%s)\n", pid, reason);
     detected = 1;
 }
 
@@ -143,7 +139,7 @@ get_processes(unsigned char *seen, int pid_max)
         }
 
         if (is_sus_name(proc->ki_comm))
-            report_sus_process(proc->ki_pid, proc->ki_comm,
+            report_sus_process(proc->ki_pid,    
                 "suspicious name");
     }
 
@@ -257,7 +253,7 @@ static int scan_processes(void) {
             continue;
 
         if (is_sus_name(proc.ki_comm)) {
-            report_sus_process(pid, proc.ki_comm, "suspicious name");
+            report_sus_process(pid, "suspicious name");
             goto cleanup;
         }
 
@@ -297,11 +293,11 @@ static int scan_processes(void) {
             continue;
 
         if (is_sus_name(proc.ki_comm))
-            report_sus_process(pid, proc.ki_comm, "suspicious name");
+            report_sus_process(pid, "suspicious name");
 
         if (sus_processes[pid].start_time.tv_sec == proc.ki_start.tv_sec &&
             sus_processes[pid].start_time.tv_usec == proc.ki_start.tv_usec) {
-            report_sus_process(pid, NULL, "hidden from process list");
+            report_sus_process(pid, "hidden from process list");
         }
     }
 
@@ -325,7 +321,7 @@ static int scan_processes(void) {
             if (!does_process_exist(pid))
                 continue;
 
-            report_sus_process(pid, NULL,
+            report_sus_process(pid,
                 "hidden process owns open files");
         }
     }
@@ -345,10 +341,8 @@ int
 main(void)
 {
     if (scan_processes()) {
-        printf("[RESULT] rootkit process evidence detected\n");
         return 1;
     }
 
-    printf("[RESULT] no rootkit process evidence detected\n");
     return 0;
 }
