@@ -139,8 +139,7 @@ get_processes(unsigned char *seen, int pid_max)
         }
 
         if (is_sus_name(proc->ki_comm))
-            report_sus_process(proc->ki_pid,    
-                "suspicious name");
+            report_sus_process(proc->ki_pid, "suspicious name");
     }
 
     free(processes);
@@ -321,8 +320,7 @@ static int scan_processes(void) {
             if (!does_process_exist(pid))
                 continue;
 
-            report_sus_process(pid,
-                "hidden process owns open files");
+            report_sus_process(pid, "hidden process owns open files");
         }
     }
 
