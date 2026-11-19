@@ -94,3 +94,20 @@
 
 - ./log 127.0.0.1 9999 /tmp/x.log
 --on REMOTE: prints "collector: port 9999, any peer, appending to /tmp/x.log"
+
+
+# PERSISTENCE CONCEALMENT AND DETECTION
+- Changes made:
+    - order of installation, because once the rootkit is loaded, the config files are hidden which means that persistence can't be ensured -> move loading to the very end after all config and setup and installation/compilation is completed
+
+- Concealment:
+    - Added more concealment to hide persistence artifacts by hooking various syscalls
+    - Hooked fstatat, openat and open syscalls, as well as access since the detector for persistence artifacts uses those to directly read config and module files
+    - blocked certain files (including rc.local and rootkit.ko) from being able to be opened by any calls
+
+- Detector:
+    - Works by first checking known sus paths
+    - Scans through startup config files and startup script directories, suspicious commands and boot modules
+    - Ignores comments to avoid false positives 
+    - Assigns risk points to each discovery, and if total amount of points crosses a threshold of 10, then the detector reports rootkit is found
+    - Certain discoveries are very indicative of rootkit existence, so automatically assign them the number of points to reach risk threshold
