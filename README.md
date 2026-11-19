@@ -27,6 +27,12 @@
 - A new system call is added to allow user to detach the module with the name given by the user.
 - In the system call, the modules list is traversed and when the module with the name is found, it is removed from the list. The similar is also done with the list of linker files.
 - Since these are global kernel data, when accessing it, the required locks are needed to be acquired to maintain the synchronisation.
+
+4. Hide the files when being inspected by `lstat/stat` family
+- These are just wrapper functions of the syscall `fstatat`, so only fstatat needs the hooking
+- The argument to this syscall contains only 1 argument, which is the name of the file it is getting the information of. Whenever it comes to the filenames that are necessary to hide, the hook now just returns `ENOENT` error, which indicate that there is no file.
+- Otherwise, the hook just calls original `fstatat`.
+
 # CHANGES MADE (JUST TO LET EVERYONE KNOW):
 1. REMOVED PRINTING OF MESSAGES FROM INSTALL
 2. UPDATED HIDE_KLD COMPILATION 
