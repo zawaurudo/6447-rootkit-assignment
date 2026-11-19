@@ -1,4 +1,4 @@
 #!/bin/sh
 
 IP="$1"
-cc -Wall -Wextra -o remote remote.c && ./remote "$IP"
+cc -Wall -Wextra -o remote_bin remote.c && ./remote_bin "$IP"

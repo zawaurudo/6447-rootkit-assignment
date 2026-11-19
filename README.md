@@ -33,6 +33,11 @@
 - The argument to this syscall contains only 1 argument, which is the name of the file it is getting the information of. Whenever it comes to the filenames that are necessary to hide, the hook now just returns `ENOENT` error, which indicate that there is no file.
 - Otherwise, the hook just calls original `fstatat`.
 
+5. Hiding process
+- Processes are tracked in a doubly-linked list called `allproc` managed in `proc.h`. The commands that are used to fetch information about processes show the information based on that list of proccesses.
+- The entries of the list are of the type `struct proc` to store the details around a process such as pid, p_flag, p_state, etc. 
+- So to hide the process, firstly, it needs to be removed from the list of processes. The unique key of a process is the pid, so just need to have a loop to go through entries in that list and remove the process that matches the pid.
+- For efficiency purpose, the processes are also stored on a hash table named `pidhashbtl`. Even though the process was removed in the main list of processes, when querying information, the hash table is still in use. Therefore, the process also needs to be removed in the hash table of processes.
 # CHANGES MADE (JUST TO LET EVERYONE KNOW):
 1. REMOVED PRINTING OF MESSAGES FROM INSTALL
 2. UPDATED HIDE_KLD COMPILATION 
