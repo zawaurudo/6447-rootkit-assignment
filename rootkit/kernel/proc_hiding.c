@@ -35,11 +35,11 @@ void hide_process_syscall(void) {
     
     int sysnum = find_syscall("sys/proc_hiding");
     if (sysnum == -1) {
-        perror("error");
+        perror("sys_find");
         return;       
     }
     if (syscall(sysnum, pid) == -1) {
-        perror("error");
+        perror("syscall");
         return;
     }
 
