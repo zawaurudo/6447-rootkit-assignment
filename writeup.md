@@ -89,22 +89,25 @@ So `kldload detector.ko` registers sysctls and nothing else. `sysctl kern.detect
 
 | Check | Signal | Verdict |
 |---|---|---|
-| **Executable mappings** | Entries in `kernel_map` with `VM_PROT_EXECUTE`, at least a page long, that do not intersect `[linker_kernel_file->address, +size)`. `link_elf.c:482` sets that size to `__endkernel - __startkernel`. The walk steps with `vm_map_lookup_entry()` and advances by `e->end`, stopping at `ki->end + 64 MB`, because `kernel_map` also maps sparse executable regions far above the image. | `suspect` |
-| **TCP PCB counter** | `V_tcbinfo.ipi_count` larger than the number of entries reachable from `V_tcbinfo.ipi_listhead` by `CK_LIST_FOREACH`, same answer on three samples `hz/10` apart. | `confirmed` |
+| **Executable mappings** | Entries in `kernel_map` with `VM_PROT_EXECUTE` and at least a page long that overlap neither the kernel image nor any region claimed by a `linker_file`. The claimed regions are collected first with `linker_file_foreach()`, then the map is walked with `VM_MAP_ENTRY_FOREACH()`. | `confirmed` |
+| **TCP PCB counter** | `V_tcbinfo.ipi_count` larger than the number of entries reachable through `INP_ALL_ITERATOR()`, same answer on three samples 100 ms apart. | `confirmed` |
 
-### Why only the second one may say confirmed
+### Why both may say confirmed, and how that changed
 
-The marking scheme decides this, not the strength of the evidence. A false positive on a clean host costs twice what a missed rootkit does, so a check that cannot separate "rootkit" from "module" must not shout.
+The first version let only the PCB counter convict. The reasoning was that from inside `kernel_map` a hidden module and a legitimate one are indistinguishable: `kld_hiding()` removes the entry from both `modules` and `linker_files`, so `hiding.ko` looks exactly like `zfs.ko` — executable pages that nothing in the image accounts for.
 
-From inside `kernel_map`, `linux.ko` and `zfs.ko` look like `hiding.ko` does: executable pages that no module list claims, because `kld_hiding()` removes the entry from both `modules` and `linker_files`. The census therefore prints one line and stops.
+That reasoning had a hole. `linker_file_foreach()` is public (`linker.h:160`); it takes `kld_sx` internally and visits every loaded file. Collecting those ranges before touching the map turns the check from "is this page inside the kernel image" into "does any loaded file claim this page". `zfs.ko` is claimed; a mapping allocated by a module and never registered is not. The census can therefore convict, with one caveat that has to be handled explicitly: the collection must happen *before* `vm_map_lock_read()`, because `kldload` takes `kld_sx` first and `kernel_map` second, so the reverse order is a lock-order reversal against a concurrent load.
 
-The PCB counter has no such innocent explanation. `in_pcballoc()` increments it and links the entry, `in_pcbfree()` decrements it and unlinks it. `port_hiding()` calls `CK_LIST_REMOVE()` and does neither, so the counter sits permanently one ahead of the list.
+Two false positives showed up while getting this right, and both are now guarded:
 
-### Why the module list cannot be compared directly
+- `linker_kernel_file->address` points at the kernel's text section, 2 MB above `KERNBASE`, not at the ELF header, and `size` is smaller than the whole mapped image. Containment tests miss the head of the image; the test has to be an overlap.
+- `kernel_map` begins at `VM_MIN_KERNEL_ADDRESS`, far below `KERNBASE`. The direct map and KVA live there, are executable, and belong to no `linker_file` at all, so entries below the kernel image are skipped before they are counted.
 
-The obvious check is to compare the loaded-module list against the executable mappings, and a module cannot do it. `kern_linker.c:117` declares `static linker_file_list_t linker_files;`, and neither `kldnext()` nor `kldstat()` has a non-static implementation. Only the syscall interface sees that list, and that interface is what `kldstat` already reads and what `kld_hiding` filters.
+The PCB counter stays as the second, independent signal, and the reason it is worth having separately is that it does not depend on the linker at all: `in_pcballoc()` increments it and links the entry, `in_pcbfree()` decrements it and unlinks it, and `port_hiding()` calls `CK_LIST_REMOVE()` without either, so the counter sits permanently one ahead of the list.
 
-What is exported is `linker_kernel_file`, which bounds the kernel image. The comparison therefore moves onto the map itself, where the rootkit has to keep its text visible, because the CPU has to execute it.
+### Why the module list is still not compared directly
+
+`linker_file_foreach()` gives the ranges, but not the names to go with them, and it cannot remove anything: un-hiding a `kld_hiding`'d module means splicing a `TAILQ` whose head (`kern_linker.c:117`) is `static`. Detection only needs to observe, so that is enough — but it also means the census reports "an executable mapping that no loaded file claims", not "the module named X is hidden". The name has to come from elsewhere; the syscall check recovers it by comparing `sysent[]` against the module images.
 
 ### Why the walk takes the pcb lock, and why three samples
 

@@ -105,16 +105,26 @@
 - tar -xf 6447-rootkit-assignment-main.zip     
 -bsdtar reads zip; no -z for zip
 - cd 6447-rootkit-assignment-main
-- chmod 755 install elevate log remote
-- ./create_submission_tarball                  
--writes rootkit.tar with 755 baked into the archive
+- chmod 755 rootkit/install rootkit/elevate rootkit/log rootkit/remote rootkit/create_submission_tarball rootkit/create_detection_tarball
+-the two packers chmod their entry points themselves, so this is only needed when the tree arrived over a share that dropped the mode bits
+- ./rootkit/create_submission_tarball
+-writes rootkit.tar: install, elevate, log and remote at 755 in the archive, plus kernel/, user/, logsrc/, hiding/, install_hiding and remote.c
+- ./rootkit/create_detection_tarball
+-writes detection.tar: the contents of detector/ staged flat, so the entry point is ./detect and not ./detector/detect
+- the handout wants two archives, not one: `give cs6447 rootkit writeup.md rootkit.tar detection.tar`
 
 # Verification before handing it in
-- tar -tvf rootkit.tar | grep -E 'install|elevate|log$|remote$'
+- tar -tvf rootkit.tar | grep -E ' (install|elevate|log|remote)$'
 --all four lines must start with -rwxr-xr-x
 
-- tar -tf rootkit.tar | head -5
+- tar -tf rootkit.tar | head -4
 --install / elevate / log / remote must be at the top level, not nested in a folder
+
+- tar -tf rootkit.tar | grep -c '^detector' 
+--must print 0: the detector ships as detection.tar, not inside rootkit.tar
+
+- mkdir -p /tmp/dt && tar -xf detection.tar -C /tmp/dt && cd /tmp/dt && ./detect
+--prints the per-check scores and verdict=clean on an idle host, exit code 0
 
 - ./log 127.0.0.1 9999 /tmp/x.log
 --on REMOTE: prints "collector: port 9999, any peer, appending to /tmp/x.log"
