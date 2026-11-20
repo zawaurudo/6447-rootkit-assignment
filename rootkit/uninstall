@@ -13,6 +13,15 @@
 #     stat(2) on the sources fails.  open(2) still works, which is why
 #     /usr/local/bin/hide_kld is preferred over rebuilding from source here.
 #
+# Which means: run this script by absolute path.
+#
+#     /root/rootkit/uninstall          works
+#     cd /root/rootkit && ./uninstall  does not -- the cd itself fails
+#
+# The directory name contains "rootkit", so the shell's chdir(2)/stat(2) on it
+# answers ENOENT while the module is loaded.  execve(2) on an absolute path is
+# not filtered, so the same file runs fine that way.
+#
 set -eu
 
 # Deliberately not `cd "$(dirname "$0")" && pwd`: this script may be started
