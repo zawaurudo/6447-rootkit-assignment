@@ -1,0 +1,2 @@
+#!/bin/sh
+cc syscall_hook_check.c -o syscall_check -lkvm && ./syscall_check

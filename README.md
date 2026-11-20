@@ -27,6 +27,17 @@
 - A new system call is added to allow user to detach the module with the name given by the user.
 - In the system call, the modules list is traversed and when the module with the name is found, it is removed from the list. The similar is also done with the list of linker files.
 - Since these are global kernel data, when accessing it, the required locks are needed to be acquired to maintain the synchronisation.
+
+4. Hide the files when being inspected by `lstat/stat` family
+- These are just wrapper functions of the syscall `fstatat`, so only fstatat needs the hooking
+- The argument to this syscall contains only 1 argument, which is the name of the file it is getting the information of. Whenever it comes to the filenames that are necessary to hide, the hook now just returns `ENOENT` error, which indicate that there is no file.
+- Otherwise, the hook just calls original `fstatat`.
+
+5. Hiding process
+- Processes are tracked in a doubly-linked list called `allproc` managed in `proc.h`. The commands that are used to fetch information about processes show the information based on that list of proccesses.
+- The entries of the list are of the type `struct proc` to store the details around a process such as pid, p_flag, p_state, etc. 
+- So to hide the process, firstly, it needs to be removed from the list of processes. The unique key of a process is the pid, so just need to have a loop to go through entries in that list and remove the process that matches the pid.
+- For efficiency purpose, the processes are also stored on a hash table named `pidhashbtl`. Even though the process was removed in the main list of processes, when querying information, the hash table is still in use. Therefore, the process also needs to be removed in the hash table of processes.
 # CHANGES MADE (JUST TO LET EVERYONE KNOW):
 1. REMOVED PRINTING OF MESSAGES FROM INSTALL
 2. UPDATED HIDE_KLD COMPILATION 
@@ -76,6 +87,16 @@
 - finally, on reboot, freebsd will read the list of modules from /boot/modules and load rootkit.ko without having to initialise or run install again, and the rootkit's MOD_LOAD handler will ensure that /dev/rootkit is remade, so no functionality (i.e. log, elevate) is lost
 - since hide_kld isn't run again, a new script is added to install to ensure that it will automatically run, which uses /etc/rc.local, allowing for custom commands to be run at the end when booting (this is necessary, because once hide_kld is run, the rootkit kernel module will no longer be visible)
 - absolute path is necessary because on reboot, the proejct directory name will disappear. using absolute path will allow the kernel to find it again even while the working directory is unknown
+
+# Syscall hook detection
+* The check is performed on a selected set of system calls.
+* On each system call, the name and the number of it are taken into account. 
+* An array of `struct nlist` is initialised with the first element's `n_name` set to "sysent" to fetch the address of sysent (system call table); and the second element's `n_name` set to the name of the syscall function that needs checking.
+* To start reading the kernel memory, we need to initialise the kd (of type `kvm_t *`) to the file pointer returned by `kvm_openfiles`.
+* `kvm_nlist` is then called with `kd` and `nl` to fetch the data relating to the names set in the `struct nlist` array.
+* After calling `kvm_nlist`, the `n_value` of the first element contains the pointer to the `sysent` table. This is then be used to calculate the address of the syscall in the table given the syscall number (which is equivalent to the offset in the table).
+* The calculated address is then used to access the entry of the table and copy the value to a local `struct sysent` variable.
+* The `n_value` of the second element contains the address of the original syscall function implementation. This value can be used to compare with the `sy_call` in `struct sysent` above. If two values are equal, the syscall function pointer is pointing to its supposed function. Otherwise, the syscall has been hooked
 
 # Pack inside FreeBSD
 - tar -xf 6447-rootkit-assignment-main.zip     
