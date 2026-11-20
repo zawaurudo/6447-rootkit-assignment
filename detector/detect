@@ -3,6 +3,8 @@
 set -u
 
 DETECT_THRESHOLD=10
+DETECT_CONFIRMED_WEIGHT=10
+DETECT_SUSPECT_WEIGHT=1
 detect_point=0
 detector_positive=0
 
@@ -44,6 +46,47 @@ run_detector()
 run_detector persistence "$BIN_DIR/persistence_detector"
 run_detector process "$BIN_DIR/process_detector"
 run_detector syscall-hooks "$BIN_DIR/syscall_hook_check"
+
+# The kernel-module evidence comes from detect.sh, which speaks the DETECTOR
+# line contract instead of --score. Fold its summary into the same accumulator:
+# one confirmed finding is worth the whole threshold, suspects have to stack up.
+run_script_detector()
+{
+    label=$1
+    script=$2
+
+    if ! out=$(sh "$script" -q); then
+        echo "detector: $label check failed" >&2
+        exit 2
+    fi
+
+    confirmed=$(printf '%s\n' "$out" |
+        sed -n 's/.*confirmed=\([0-9][0-9]*\).*/\1/p' | tail -n 1)
+    suspect=$(printf '%s\n' "$out" |
+        sed -n 's/.*suspect=\([0-9][0-9]*\).*/\1/p' | tail -n 1)
+
+    case "$confirmed" in
+        ''|*[!0-9]*)
+            echo "detector: $label check returned no usable confirmed count" >&2
+            exit 2
+            ;;
+    esac
+    case "$suspect" in
+        ''|*[!0-9]*)
+            echo "detector: $label check returned no usable suspect count" >&2
+            exit 2
+            ;;
+    esac
+
+    [ "$confirmed" -gt 0 ] && detector_positive=1
+    detect_point=$((detect_point + confirmed * DETECT_CONFIRMED_WEIGHT +
+        suspect * DETECT_SUSPECT_WEIGHT))
+}
+
+if [ "$(uname -s)" = "FreeBSD" ] && command -v kldstat >/dev/null 2>&1 &&
+    [ -f "$SCRIPT_DIR/detect.sh" ] && [ "${DETECTOR_SKIP_SCRIPT_CHECKS:-0}" != "1" ]; then
+    run_script_detector kernel-modules "$SCRIPT_DIR/detect.sh"
+fi
 
 if [ "$detector_positive" -eq 1 ] ||
     [ "$detect_point" -ge "$DETECT_THRESHOLD" ]; then

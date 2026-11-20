@@ -18,6 +18,15 @@ rootkit/hiding/machine
 rootkit/hiding/x86
 rootkit/hiding/i386
 
+detector/kmod/*.o
+detector/kmod/*.ko
+detector/kmod/.depend*
+detector/kmod/export_syms
+detector/kmod/vnode_if*.h
+detector/kmod/machine
+detector/kmod/x86
+detector/kmod/i386
+
 # userland build products
 rootkit/user/elevate
 rootkit/user/hide_kld
