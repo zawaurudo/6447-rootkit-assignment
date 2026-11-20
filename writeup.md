@@ -1,4 +1,4 @@
-# FreeBSD Rootkit - Midpoint Design
+# FreeBSD Rootkit - Final Design
 
 ## Architecture
 
@@ -63,6 +63,78 @@ Capture is in the kernel because the terminal read can only be observed there, b
 Verified on FreeBSD 14.5: the module builds under `-Werror` without warnings, `install <collector>` returns 0 and starts `rklog`, `/dev/rootkit` and the six `kern.rootkit` nodes appear, a reboot brings both the module (`kld_list`) and the daemon (`/etc/rc.local`) back, typing in an interactive session produces one entry per command, and `printf 'x\n' | cat` produces none.
 
 Do not iterate by `kldunload rootkit`: the UDP listener thread from `rootkit.c` is not stopped on unload and its next return lands in freed module text, so the box panics (`Fatal trap 12 ... current process = kmod_remote_listen`). Copy the rebuilt module to `/boot/modules/rootkit.ko` and reboot instead.
+
+## Changes since the midpoint
+
+| Area | Change |
+|---|---|
+| Hiding | No code changed, only its location. The tree moved under `rootkit/` after the midpoint, so the concealment now sits in `rootkit/kernel/rootkit.c` and `rootkit/hiding/hiding.c`. The first registers `sys/kld_hiding` and `sys/port_hiding` on the main module, the second is the standalone `KMOD= hiding` prototype. The two are still byte-for-byte duplicates. |
+| Detection | New: `detector/`, a kernel module plus a userland script, described below. Nothing under `rootkit/` was changed to accommodate it. |
+
+## Detection design
+
+Detection is split by area across three PRs. This one covers kernel modules and the network side. Filesystem checks, processes and persistence artefacts, device nodes, logs and syscall integrity belong to the other two.
+
+### Why a kernel module
+
+Both signals worth acting on live in kernel structures. `kldstat` and `netstat` read the same lists the rootkit edits, so a userland tool built on them reports a clean host while `kld_hiding` is doing its job. Only reading the structures underneath shows the discrepancy.
+
+### Why it does not scan on load
+
+`MOD_LOAD` runs inside the linker with `kernel_map` already write-locked, and the walk wants `vm_map_lock_read()`. A scan there hangs `kldload` with no output and no recovery short of a reboot. That took three attempts to accept.
+
+So `kldload detector.ko` registers sysctls and nothing else. `sysctl kern.detector.scan=1` runs one pass from ordinary process context, where sleeping is permitted. `detect.sh` issues that call, which is why the script works on a host where the module was loaded hours ago.
+
+### The two checks
+
+| Check | Signal | Verdict |
+|---|---|---|
+| **Executable mappings** | Entries in `kernel_map` with `VM_PROT_EXECUTE`, at least a page long, that do not intersect `[linker_kernel_file->address, +size)`. `link_elf.c:482` sets that size to `__endkernel - __startkernel`. The walk steps with `vm_map_lookup_entry()` and advances by `e->end`, stopping at `ki->end + 64 MB`, because `kernel_map` also maps sparse executable regions far above the image. | `suspect` |
+| **TCP PCB counter** | `V_tcbinfo.ipi_count` larger than the number of entries reachable from `V_tcbinfo.ipi_listhead` by `CK_LIST_FOREACH`, same answer on three samples `hz/10` apart. | `confirmed` |
+
+### Why only the second one may say confirmed
+
+The marking scheme decides this, not the strength of the evidence. A false positive on a clean host costs twice what a missed rootkit does, so a check that cannot separate "rootkit" from "module" must not shout.
+
+From inside `kernel_map`, `linux.ko` and `zfs.ko` look like `hiding.ko` does: executable pages that no module list claims, because `kld_hiding()` removes the entry from both `modules` and `linker_files`. The census therefore prints one line and stops.
+
+The PCB counter has no such innocent explanation. `in_pcballoc()` increments it and links the entry, `in_pcbfree()` decrements it and unlinks it. `port_hiding()` calls `CK_LIST_REMOVE()` and does neither, so the counter sits permanently one ahead of the list.
+
+### Why the module list cannot be compared directly
+
+The obvious check is to compare the loaded-module list against the executable mappings, and a module cannot do it. `kern_linker.c:117` declares `static linker_file_list_t linker_files;`, and neither `kldnext()` nor `kldstat()` has a non-static implementation. Only the syscall interface sees that list, and that interface is what `kldstat` already reads and what `kld_hiding` filters.
+
+What is exported is `linker_kernel_file`, which bounds the kernel image. The comparison therefore moves onto the map itself, where the rootkit has to keep its text visible, because the CPU has to execute it.
+
+### Why three samples, and why no lock
+
+One read is not worth acting on. `ipi_count` and the list are updated by different threads, so a scan racing with a connect or a close can see a delta that disappears on the next pass. Reporting that would be a false positive on any busy host.
+
+Both values are read without `INP_INFO_RLOCK()`. The walk runs from sysctl context, a lock held across `CK_LIST_FOREACH` can sleep on this path, and a detector that deadlocks the box it was meant to diagnose has done more damage than a miss. A torn read costs one sample out of three; the other two decide.
+
+### The userland half
+
+`detect.sh` covers what cannot be confirmed from userland, and never prints more than `suspect`. Two bookkeeping discrepancies: a module present in `/boot/modules` or named in `kld_list` that `kldstat -n` does not report, and a socket in `sockstat` with no owning process.
+
+Both are reconciled against kernel sources the rootkit edits independently, which is the only reason they are worth printing.
+
+### Measured
+
+FreeBSD 14.5 under QEMU, `kern.osreldate=1405000`, `detector.ko` built under `-Werror`:
+
+```text
+Clean host:            kldload returns immediately, scan -> confirmed=0 suspect=2
+                       the two suspect lines are intpm.ko and smbus.ko, both built into this image
+Clean host + modules:  kldload linux, kldload zfs -> confirmed=0 suspect=4, census 17 entries
+Clean host + jail:     jail -c name=j1 path=/root/jr vnet persist -> confirmed=0 suspect=4
+Rootkit loaded:        confirmed=0 suspect=3, the third line is rootkit.ko's text
+Network half:          nc -l 4444 -> netstat shows 2, port_hide 4444 -> 1,
+                       next scan confirmed=1, tcp ipi_count=4 list=3 delta=1 on all three samples
+```
+
+The rootkit scenario stays at `confirmed=0`, which is the honest result for this scope. Its `getdirentries` hook and both `SYSCALL_MODULE` registrations resolve into the module's own text, and from `kernel_map` that looks like any other module. Catching them needs a `sysent` comparison against the loaded image, which is the syscall-integrity PR.
+
+The hiding module alone is caught the same way as the full one: `kldload hiding.ko` gives `confirmed=0 suspect=3` and one census line for its own 8 KB of text.
 
 ## Summary
 
