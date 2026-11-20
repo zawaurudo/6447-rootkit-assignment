@@ -58,8 +58,8 @@
 # LOG
 - three pieces: capture inside the kernel, delivery in a userland daemon, collection on $REMOTE
 - CAPTURE (`kernel/log.c`): `sysent[SYS_read]` is patched with `rk_read_hook`, which calls the genuine `read()` first and only then copies the returned bytes in
-- the hook keys on descriptor 0, so it sees both kinds of input the assignment asks for: a shell on the physical console reads the tty through stdin, and sshd hands the SSH protocol stream to the login shell through a pty, which that shell also reads through stdin. programs that read stdin through libc (`cat`, `su`, an editor's prompt) are captured the same way
-- only terminal reads are recorded. the descriptor is opened with `fget_read()` and kept only when the vnode carries `VV_ISTTY` or is a character device, which covers a pty slave even when devfs did not stamp the flag. the descriptor *number* is not the test: over ssh the login shell reads its pty as fd 5, so a fd-0-only version recorded nothing. the one character device that is refused is our own -- `rootkit_is_our_vnode()` compares `vp->v_rdev` with the cdev from `make_dev_p()`, which keeps the sender's drain of `/dev/rootkit` from feeding the ring its own output. reads beginning with `!` are dropped too, because `devd` holds `/dev/console` open and pours syslog through it. pipes, sockets and regular files go through the same syscall and are deliberately ignored: `ls | cat`, or the 50 KB of shell variables that `sysrc`/`bsdconfig` pipe into `/bin/sh`, would otherwise flush every keystroke out of the 64 KB ring in one call
+- both kinds of input the assignment asks for go through this one hook: a shell on the physical console reads a tty, and sshd hands the login shell a pty, which that shell reads the same way. programs that read through libc (`cat`, `su`, an editor's prompt) are captured too
+- only terminal reads are recorded, and the test is the *type of file*, not the descriptor number: the descriptor is resolved with `fget_read()` and kept when it is either `DTYPE_PTS` -- a pty is its own file type, `finit(fp, fflags, DTYPE_PTS, ...)` in `kern/tty_pts.c`, so a `DTYPE_VNODE` test alone matches `/dev/console` and nothing else -- or a vnode carrying `VV_ISTTY`/`VCHR`. sshd and `su(1)` pick whatever descriptor is free for the child (a login over ssh reads its pty as fd 5), so an fd-0 test records nothing. the one character device that is refused is our own -- `rootkit_is_our_vnode()` compares `vp->v_rdev` with the cdev from `make_dev_p()`, which keeps the sender's drain of `/dev/rootkit` from feeding the ring its own output. reads beginning with `!` are dropped as well, and so are the console daemons (`devd`, `syslogd`, skipped by `p_comm`): one of them alone produced 2,716 hook events and pushed every real keystroke out of the ring. pipes, sockets and regular files go through the same syscall and are deliberately ignored: `ls | cat`, or the 50 KB of shell variables that `sysrc`/`bsdconfig` pipe into `/bin/sh`, would otherwise flush every keystroke out of the 64 KB ring in one call. reads larger than `RK_LOG_MAX_READ` (512 bytes) are ignored for the same reason -- a person types tens of bytes, a scanner drains kilobytes
 - bytes are assembled into lines before they reach the ring: one entry per command, with a single `[t=seconds.micro pid=uid] ` header, instead of one entry per `read()`. this matters because a program's `read()` returns whatever the line discipline has buffered, so raw captures split commands in odd places. `\r` (what a pty actually sends for Enter) and `\n` both end a line, and the `\n` of a CRLF pair is swallowed so Windows-style input does not produce blank entries; a pending partial line is flushed when pid or uid changes and on unload
 - optional output capture: `sysent[SYS_write]` can additionally record fd 1/2, disabled by default because one `ls` of a big directory floods the ring with more text than a user types in a minute. it is a compile-time constant (`rk_log_stdout` in `kernel/log.c`) -- there is no runtime knob, because a `sysctl` tree named `kern.rootkit` is the first thing a detector greps for
 - the ring is 64 KB and drops the oldest bytes when full, so a burst never leaves a torn line at the front. it is drained only through `/dev/rootkit`; a `dd if=/dev/rootkit bs=64k count=1` while typing is the quickest way to see what is in it
@@ -70,7 +70,8 @@
 - the collector accepts any peer and only prints a note when the source address differs from `<TARGET_IP>`; `-f` turns that into a refusal. strict matching is not the default because the two machines are not on the same network in the assignment and NAT (QEMU's slirp included) rewrites the peer address, which would silently discard the exfiltrated data
 - no socket is created in the kernel on purpose: the tty hook, the ring and the character device are the parts that need kernel privilege, while retry, spool and buffering logic cannot panic the box from userland
 - to verify on $TARGET: `kldstat -m rootkit` must fail, `sysctl -a | grep -i rootkit` must print nothing, `( : < /dev/rootkit )` must succeed, then type in a real terminal session (the serial console, or `ssh` into the box) and watch `exfil.log` on $REMOTE grow one entry per command. a non-interactive `ssh host 'printf "x\n" | cat'` must produce nothing, which proves the pipe filter works
-- there is no quick way to iterate. unload now stops the listener thread and waits for it, so a clean `kldunload` no longer panics the box, but while hiding is on `kldunload` cannot resolve the name either. rebuild, copy to `/boot/modules/rootkit.ko` and reboot
+- measured, not assumed: `echo SECRET42` typed into a `script(1)` pty and `echo SECRET99` typed into a real `ssh -tt` session both land in the collector's file -- 11,055 bytes, one line per command, each with its `[t= pid= uid=]` header
+- there is no quick way to iterate by hand: `kldunload` resolves the name with the same `modfind` that answers `ENOENT` while hiding is on. that is what `./uninstall` is for (below), otherwise the sequence is `hide_kld -u` to turn hiding off, `kldunload rootkit`, rebuild, copy to `/boot/modules/rootkit.ko`, `kldload`
 
 # ELEVATE
 - elevate is split between a user and kernel program
@@ -91,7 +92,14 @@
 - since hide_kld isn't run again, a new script is added to install to ensure that it will automatically run, which uses /etc/rc.local, allowing for custom commands to be run at the end when booting (this is necessary, because once hide_kld is run, the rootkit kernel module will no longer be visible)
 - absolute path is necessary because on reboot, the proejct directory name will disappear. using absolute path will allow the kernel to find it again even while the working directory is unknown
 
-# Syscall hook detection
+# UNINSTALL
+- `./uninstall` reverses `./install`, and the order is the whole point: **turn hiding off, unload, then delete**
+- while the module is live, `modfind`, `fstatat`, `getdirentries`, `open` and `access` all cooperate to make the module and every path containing "rootkit" or "hide" disappear. a script that stats or deletes anything before unloading concludes that nothing was ever installed -- `[ -e /boot/modules/rootkit.ko ]` is false, `/etc/rc.conf` cannot be opened, and `kldunload rootkit` answers "no such module"
+- step 1 sends the empty module name to `sys/kld_hiding` with `/usr/local/bin/hide_kld -u`, which turns the syscall filters off without touching the kernel lists. `hide_kld` is installed into `/usr/local/bin` because the in-tree copy lives under a path that is itself hidden. if the helper cannot be exec'd (module not registered), the script falls back to `dd`-ing `user/hide_kld.c` out of the hidden tree, compiling it in `/tmp` and running that copy -- `open()` is not filtered, only `stat()` is, so `dd` still reads the source
+- step 2 is `kldunload rootkit`, retried as `kldunload -n rootkit`. both failing aborts with "nothing was deleted" rather than deleting half of it
+- step 3 removes `/boot/modules/rootkit.ko`, `rklog`, `revshell`, `elevate` and `hide_kld`, the `kld_list` entry and the `/etc/rc.local` lines. verified: rc 0, and afterwards `/dev/rootkit` is gone, `kldstat` lists only the stock modules, and `dmesg` says nothing about any of this
+
+
 * The check is performed on a selected set of system calls.
 * On each system call, the name and the number of it are taken into account.
 * An array of `struct nlist` is initialised with the first element's `n_name` set to "sysent" to fetch the address of sysent (system call table); and the second element's `n_name` set to the name of the syscall function that needs checking.
@@ -114,11 +122,14 @@
 - the handout wants two archives, not one: `give cs6447 rootkit writeup.md rootkit.tar detection.tar`
 
 # Verification before handing it in
-- tar -tvf rootkit.tar | grep -E ' (install|elevate|log|remote)$'
---all four lines must start with -rwxr-xr-x
+- tar -tvf rootkit.tar | grep -E ' (install|uninstall|elevate|log|remote)$'
+--all five lines must start with -rwxr-xr-x
+
+- tar -tf rootkit.tar | wc -l
+--21 members: the five entry points, remote.c, kernel/ (module + log + interface), user/ (the two sources install compiles), logsrc/ (sender and collector)
 
 - tar -tf rootkit.tar | head -4
---install / elevate / log / remote must be at the top level, not nested in a folder
+--install / uninstall / elevate / log / remote must be at the top level, not nested in a folder
 
 - tar -tf rootkit.tar | grep -c '^detector' 
 --must print 0: the detector ships as detection.tar, not inside rootkit.tar

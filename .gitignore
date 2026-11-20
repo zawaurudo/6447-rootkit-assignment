@@ -1,5 +1,6 @@
 .vm-cache/
 rootkit.tar
+detection.tar
 setup.sh
 bds_freebsd
 
@@ -13,12 +14,6 @@ rootkit/kernel/opt_global.h
 rootkit/kernel/machine
 rootkit/kernel/x86
 rootkit/kernel/i386
-rootkit/hiding/*.o
-rootkit/hiding/*.ko
-rootkit/hiding/opt_global.h
-rootkit/hiding/machine
-rootkit/hiding/x86
-rootkit/hiding/i386
 
 detector/kmod/*.o
 detector/kmod/*.ko
