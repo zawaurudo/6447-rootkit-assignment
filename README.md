@@ -51,6 +51,9 @@
 - the rootkit is compiled using freebsd's existing kernel module building mechanism, which produles the kernel module rootkit.ko
 - the user programs such as elevate.c are then compiled and installed into /usr/local/bin which allows it to remain available even after reboot
 - the user program hide_kld.c is also compiled, and persistence is maintained through /etc/rc.local, which runs this script again after each reboot
+- loading is the last step on purpose: the module hides `/etc/rc.conf`, `/etc/rc.local` and `/boot/modules/rootkit.ko` from `open()` the moment it is live, so every write above has to happen first
+- re-running `./install` while the module is loaded stops with an explanation and exit 0. `is_hiding_path()` matches the substring "rootkit", so the project directory itself stops resolving and nothing under it can be rebuilt. a reboot is the only way back to a clean kernel, because `kld_hiding` also removes the module from `linker_files` and `kldunload` can no longer find it by name
+- the three status lines ("rootkit.ko installed", "rklog started", "revshell waiting") print before `kldload` for the same reason: they test paths that are on `blocked_files`, so afterwards they would silently claim nothing had been installed
 
 # LOG
 - three pieces: capture inside the kernel, delivery in a userland daemon, collection on $REMOTE

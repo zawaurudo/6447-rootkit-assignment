@@ -106,35 +106,41 @@ The obvious check is to compare the loaded-module list against the executable ma
 
 What is exported is `linker_kernel_file`, which bounds the kernel image. The comparison therefore moves onto the map itself, where the rootkit has to keep its text visible, because the CPU has to execute it.
 
-### Why three samples, and why no lock
+### Why the walk takes the pcb lock, and why three samples
 
-One read is not worth acting on. `ipi_count` and the list are updated by different threads, so a scan racing with a connect or a close can see a delta that disappears on the next pass. Reporting that would be a false positive on any busy host.
+`ipi_count` and the list are updated by different threads, so a scan racing with a connect or a close can see a delta that disappears on the next pass. Reporting that would be a false positive on any busy host, so the count is compared three times, 100 ms apart, and only a delta that survives all three is reported.
 
-Both values are read without `INP_INFO_RLOCK()`. The walk runs from sysctl context, a lock held across `CK_LIST_FOREACH` can sleep on this path, and a detector that deadlocks the box it was meant to diagnose has done more damage than a miss. A torn read costs one sample out of three; the other two decide.
+The walk itself goes through `INP_ALL_ITERATOR()` and `inp_next()`, which take `INPLOOKUP_RLOCKPCB` on each pcb as it is visited. It has to run to completion: `inp_next()` releases the pcb lock and the SMR reference only on the call that returns NULL, so breaking out early leaks both. The previous version walked `ipi->ipi_listhead` under `CK_LIST_FOREACH` with no lock at all -- on 14.5 that list is SMR-protected, and a scan racing with `CK_LIST_REMOVE` walks freed memory.
 
 ### The userland half
 
-`detect.sh` covers what cannot be confirmed from userland, and never prints more than `suspect`. Two bookkeeping discrepancies: a module present in `/boot/modules` or named in `kld_list` that `kldstat -n` does not report, and a socket in `sockstat` with no owning process.
+`detect.sh` covers what cannot be confirmed from userland, and never prints more than `suspect`. Two bookkeeping discrepancies: a module present in `/boot/modules` or named in `kld_list` that `kldstat` does not report, and a socket in `sockstat` with no owning process.
 
 Both are reconciled against kernel sources the rootkit edits independently, which is the only reason they are worth printing.
 
 ### Measured
 
-FreeBSD 14.5 under QEMU, `kern.osreldate=1405000`, `detector.ko` built under `-Werror`:
+FreeBSD 14.5 under QEMU, `kern.osreldate=1405000`, everything built under `-Wall -Wextra` (`-Werror` for the userland half of the detector):
 
 ```text
-Clean host:            kldload returns immediately, scan -> confirmed=0 suspect=2
-                       the two suspect lines are intpm.ko and smbus.ko, both built into this image
-Clean host + modules:  kldload linux, kldload zfs -> confirmed=0 suspect=4, census 17 entries
-Clean host + jail:     jail -c name=j1 path=/root/jr vnet persist -> confirmed=0 suspect=4
-Rootkit loaded:        confirmed=0 suspect=3, the third line is rootkit.ko's text
-Network half:          nc -l 4444 -> netstat shows 2, port_hide 4444 -> 1,
-                       next scan confirmed=1, tcp ipi_count=4 list=3 delta=1 on all three samples
+Module census, clean host:     entries=10 exec=4 linker_files=4 unclaimed=0
+                               module status=clean conf=high
+Module census, hooktest.ko:    confirmed=1 -- the 16 KB RWX mapping at
+                               0xffffffff83000000 is claimed by no linker_file
+./detect, clean host:          persistence 0, process 0, syscall-hooks 0,
+                               kernel-modules suspect=1, total 1, verdict=clean
+./detect, rootkit loaded:      persistence 10, syscall-hooks 9,
+                               total 20 threshold 10, verdict=rootkit-suspected
 ```
 
-The rootkit scenario stays at `confirmed=0`, which is the honest result for this scope. Its `getdirentries` hook and both `SYSCALL_MODULE` registrations resolve into the module's own text, and from `kernel_map` that looks like any other module. Catching them needs a `sysent` comparison against the loaded image, which is the syscall-integrity PR.
+The single suspect on a clean host is a `? ? ? ? udp4 *:4444` socket. `sockstat` prints one `?` in the process column when it cannot attribute a socket, and `detect.sh` used to look for `???`, so that line never fired.
 
-The hiding module alone is caught the same way as the full one: `kldload hiding.ko` gives `confirmed=0 suspect=3` and one census line for its own 8 KB of text.
+The module census does not convict the rootkit, and that is the honest result: its text belongs to a linker_file, so it looks like any other module from `kernel_map`. What the census does convict is an executable mapping that no module claims -- demonstrated above with a two-line test module that allocates one. The rootkit is caught by the other two checks, which is the division of labour the design intends.
+
+Two behaviours of the census are worth recording, because both were false positives before:
+
+- `linker_kernel_file->address` points at the kernel's text section (2 MB above `KERNBASE`), not at the ELF header, and its `size` is smaller than the mapped region. The test has to be an overlap check, not containment.
+- `kernel_map` starts at `VM_MIN_KERNEL_ADDRESS`, which is far below `KERNBASE`; the direct map and KVA live there, are executable, and belong to no linker_file. Everything below the kernel image is skipped.
 
 ## Summary
 
