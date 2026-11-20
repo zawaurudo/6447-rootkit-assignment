@@ -125,7 +125,9 @@ Pointing `port_hiding()` at `V_udbinfo` would make the delta check fire. It woul
 
 Two places depend on the release.
 
-`det_kernel_image()` reads `linker_kernel_file->address` and `.size`. That size is set from `__endkernel - __startkernel` (`link_elf.c:482`), so the bounds stay correct across builds without hardcoding anything.
+`det_kernel_image()` reads `linker_kernel_file->address` and `.size`. On amd64 that address is the text segment, not `KERNBASE`: the ELF header occupies the two megabytes below it, and the map entry holding the kernel runs past `address + size`. So the mapping is compared by overlap — `e->start < ki->end && e->end > ki->start` — not by containment. Measured on 14.5/amd64: image `0xffffffff80200000` + 32794176, mapping `0xffffffff80000000`-`0xffffffff82818000`. A containment test reported the whole kernel as belonging to no linker_file.
+
+`det_scan_modules()` only looks at `[image start, image end + 64MB]`, which is the region `kldload()` allocates from, and it skips everything below the image. `kernel_map` begins much lower, at `VM_MIN_KERNEL_ADDRESS` (`0xfffffe00...`), and that half is direct map and KVA: executable, and owned by no linker_file for perfectly good reasons. A module loaded by hand down there — `vm_map_find(..., VMFS_ANY_SPACE, VM_PROT_EXECUTE, ...)` with no linker_file behind it — is outside the window and is not reported. Detection needs the mapping to land above `KERNBASE`.
 
 `det_scan_modules()` depends on how the module list and the map are reached, and both changed in 14.x:
 
@@ -133,6 +135,18 @@ Two places depend on the release.
 - `kernel_map` is an rbtree. Following `entry->right`/`entry->left` from inside a module does not terminate, which cost me an afternoon. `VM_MAP_ENTRY_FOREACH()` (`vm_map.h:519`) is the supported walk: `vm_map_entry_first()` plus `vm_map_entry_succ()`, stopping on `&map->header`. It also makes `continue` safe, which the older address-at-a-time walk through `vm_map_lookup_entry()` could not use, because the advance lived at the bottom of the loop body.
 
 `det_scan_pcbs()` walks with `inp_next()` and `INP_ALL_ITERATOR()` from `in_pcb.h:718`, not a bare `CK_LIST_FOREACH`. The iterator pairs SMR with a per-pcb lock, and it releases both on the call that finally returns `NULL`, so the loop must run to the end rather than `break` early. On 14.5 `rootkit`'s `port_hiding()` unlinks under `INP_INFO_WLOCK` without freeing the pcb, and `in_pcbfree()` will `CK_LIST_REMOVE()` the same node a second time — a raw list walk races both.
+
+## Verified on
+
+FreeBSD 14.5-RELEASE/amd64, GENERIC, clang 21.1.8, built with `make kmod` against `/usr/src/sys`:
+
+| Setup | Output |
+|---|---|
+| idle host | `module status=clean ... (10 walked, 4 executable, 4 files)`, `summary confirmed=0` |
+| fixture that `vm_map_find()`s 4 pages RWX at `0xffffffff83000000` | `module status=confirmed ... 0xffffffff83000000-0xffffffff83004000 (16384 bytes)`, `summary confirmed=1` |
+| fixture unloaded | `confirmed=0` again |
+
+`kldunload detector` drops every sysctl and the module reloads clean; a second `kldload` of the same file is refused with `module already loaded`.
 
 ## Files
 

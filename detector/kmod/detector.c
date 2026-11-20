@@ -49,7 +49,7 @@
 #include <sys/linker.h>
 #include <sys/file.h>
 #include <sys/ck.h>
-#include <sys/atomic.h>
+#include <machine/atomic.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -138,6 +138,12 @@ det_kernel_image(struct det_kimage *ki)
 		ki->end = (vm_offset_t)kf->address + kf->size;
 		ki->valid = 1;
 	}
+	if (det_verbose)
+		printf("DETECTOR kimage kf=%p address=0x%jx size=%ju "
+		    "start=0x%jx end=0x%jx valid=%d\n", (void *)kf,
+		    kf != NULL ? (uintmax_t)(uintptr_t)kf->address : 0,
+		    kf != NULL ? (uintmax_t)kf->size : 0,
+		    (uintmax_t)ki->start, (uintmax_t)ki->end, ki->valid);
 }
 
 /*
@@ -187,7 +193,12 @@ det_claimed(const struct det_lfranges *fr, vm_offset_t start, vm_offset_t end)
 	int i;
 
 	for (i = 0; i < fr->n; i++) {
-		if (start >= fr->start[i] && end <= fr->end[i])
+		/*
+		 * Overlap again: a vm_map entry is page aligned and a .ko's text
+		 * segment can share a page boundary with its data, so the entry
+		 * may reach a few bytes past address+size.
+		 */
+		if (start < fr->end[i] && end > fr->start[i])
 			return (1);
 	}
 	return (0);
@@ -237,15 +248,25 @@ det_scan_modules(const struct det_kimage *ki)
 	VM_MAP_ENTRY_FOREACH(e, kernel_map) {
 		if (e->start >= limit)
 			break;
+		/*
+		 * kernel_map starts at VM_MIN_KERNEL_ADDRESS, well below KERNBASE,
+		 * and everything down there is the direct map and KVA: never
+		 * executable code.
+		 */
 		if (e->end <= ki->start)
-			continue;	/* below the image: pmap leftovers */
+			continue;
 		total++;
 		if ((e->protection & VM_PROT_EXECUTE) == 0)
 			continue;
 		if ((e->end - e->start) < PAGE_SIZE)
 			continue;
 		nexec++;
-		if (e->start >= ki->start && e->end <= ki->end)
+		/*
+		 * Overlap, not containment. linker_kernel_file->address is the
+		 * text segment, so on amd64 the kernel's own mapping starts
+		 * 2MB below it (the ELF header) and ends above address+size.
+		 */
+		if (e->start < ki->end && e->end > ki->start)
 			continue;	/* the statically linked kernel */
 		if (det_claimed(&fr, e->start, e->end))
 			continue;	/* a module that is still on the list */
