@@ -1,0 +1,141 @@
+#!/bin/sh
+#
+# Remove the rootkit from this machine.
+#
+# The awkward part is that the thing being removed is actively hiding itself and
+# everything that names it.  Two consequences shape this script:
+#
+#   * `kldstat -m rootkit` cannot see the module, and `kldunload rootkit` cannot
+#     find it either, because kldfind answers ENOENT while hiding is on.  The
+#     kernel exposes an empty-name call on sys/kld_hiding that turns hiding off
+#     again; after that the module is an ordinary one and unloads normally.
+#   * Every path under this directory matches is_hiding_path() ("rootkit"), so
+#     stat(2) on the sources fails.  open(2) still works, which is why
+#     /usr/local/bin/hide_kld is preferred over rebuilding from source here.
+#
+set -eu
+
+# Deliberately not `cd "$(dirname "$0")" && pwd`: this script may be started
+# while the module is still loaded, and then every path under this directory
+# answers ENOENT, so the subshell would fail and `set -e` would abort before a
+# single line of the actual removal ran. Keep the directory as written.
+PROJECT_DIR=${0%/*}
+[ "$PROJECT_DIR" = "$0" ] && PROJECT_DIR="."
+
+PERSISTENCE_DIR="/boot/modules"
+PERSISTENCE_FILE="$PERSISTENCE_DIR/rootkit.ko"
+HIDE_KLD="/usr/local/bin/hide_kld"
+
+say() {
+    printf '%s\n' "$*"
+}
+
+warn() {
+    printf 'uninstall: %s\n' "$*" >&2
+}
+
+# Same probe as install: kldstat is lied to, open(2) is not.
+module_loaded() {
+    kldstat -q -m rootkit >/dev/null 2>&1 && return 0
+    ( : < /dev/rootkit ) 2>/dev/null && return 0
+    return 1
+}
+
+# Turn hiding off so the module becomes nameable again.  Falls back to copying
+# the source out with dd and building it in /tmp, because cc stat()s its input
+# and the path it would stat is hidden.
+unhide() {
+    # No `[ -x ... ]` test in front: "hide_kld" contains "hide", which
+    # is_hiding_path() also matches, so stat() on it answers ENOENT while the
+    # module is loaded. execve() is not hooked, so just run it and trust the
+    # exit status.
+    if "$HIDE_KLD" -u 2>/dev/null; then
+        return 0
+    fi
+
+    # Same trap for the source: dd uses open(2), cc uses stat(2).
+    if dd if="$PROJECT_DIR/user/hide_kld.c" of=/tmp/unhide_build.c 2>/dev/null &&
+        "${CC:-cc}" -O2 -o /tmp/unhide_build /tmp/unhide_build.c >/dev/null 2>&1 &&
+        /tmp/unhide_build -u 2>/dev/null; then
+        return 0
+    fi
+
+    warn "could not turn hiding off; the module stays loaded until reboot"
+    return 1
+}
+
+say "== stopping the userspace pieces =="
+pkill -f rklog 2>/dev/null || true
+pkill -f revshell 2>/dev/null || true
+say "   rklog and revshell stopped"
+
+# Order matters more than it looks.  While the module is loaded, every path
+# whose name contains "rootkit" resolves to ENOENT through the fstatat and
+# getdirentries hooks, and /etc/rc.conf, /etc/rc.local and the persistence file
+# are on blocked_files, so open() fails on them too.  Anything that tests,
+# reads or deletes those paths has to run after the module is gone, or it
+# quietly decides they were never there.
+if module_loaded; then
+    say "== unloading rootkit.ko =="
+    if ! unhide; then
+        warn "cannot unload while hiding is on; reboot, then run this again"
+        warn "nothing was deleted"
+        exit 1
+    fi
+
+    if ! kldunload rootkit; then
+        if ! kldunload -n rootkit; then
+            warn "kldunload refused; run 'dmesg | tail' to see why"
+            warn "nothing was deleted"
+            exit 1
+        fi
+    fi
+    say "   module unloaded"
+else
+    say "== rootkit.ko is not loaded =="
+fi
+
+say "== removing the files =="
+for f in "$PERSISTENCE_FILE" \
+    /usr/local/bin/rklog \
+    /usr/local/bin/revshell \
+    /usr/local/bin/elevate \
+    /usr/local/bin/hide_kld \
+    /etc/rootkit_remote_ip; do
+    if [ -e "$f" ]; then
+        rm -f "$f"
+        say "   removed $f"
+    fi
+done
+
+say "== clearing persistence =="
+# kld_list: drop just this word, keep everything else.
+if [ -f /etc/rc.conf ] && sysrc -n kld_list 2>/dev/null | tr ' ' '\n' | grep -qx rootkit; then
+    NEW_LIST=$(sysrc -n kld_list 2>/dev/null | tr ' ' '\n' | grep -vx rootkit | tr '\n' ' ' | sed 's/ *$//')
+    sysrc kld_list="$NEW_LIST" >/dev/null
+    say "   kld_list is now: ${NEW_LIST:-<empty>}"
+else
+    say "   kld_list has no rootkit entry"
+fi
+
+# rc.local: drop the lines this project writes, leave the rest alone.
+if [ -f /etc/rc.local ]; then
+    grep -v -e rklog -e hide_kld /etc/rc.local > /etc/rc.local.new || true
+    if grep -q . /etc/rc.local.new; then
+        mv /etc/rc.local.new /etc/rc.local
+        chmod +x /etc/rc.local
+        say "   rc.local entries removed"
+    else
+        # Only the shebang would be left; the file existed solely for us.
+        rm -f /etc/rc.local /etc/rc.local.new
+        say "   rc.local removed (it only held our entries)"
+    fi
+else
+    say "   no rc.local"
+fi
+
+say ""
+say "Rootkit removed."
+if module_loaded; then
+    say "The module is still in memory; reboot to clear the last of it."
+fi

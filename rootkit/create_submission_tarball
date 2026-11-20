@@ -38,7 +38,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
 # Shipped from rootkit/
-FILES="install elevate log remote remote.c kernel user logsrc"
+FILES="install uninstall elevate log remote remote.c kernel user logsrc"
 
 # Nothing is copied from the repository root.  The submission is
 # `give cs6447 rootkit writeup.md rootkit.tar detection.tar`: the detector tree
@@ -76,7 +76,7 @@ rm -f "$STAGE"/kernel/revshell "$STAGE"/user/elevate "$STAGE"/user/hide_kld
 # A CRLF here turns "#!/bin/sh" into "#!/bin/sh^M" and the grader's first
 # command dies with "not found". core.autocrlf is true on the development
 # machine, so check instead of assuming.
-for f in install elevate log remote create_submission_tarball \
+for f in install uninstall elevate log remote create_submission_tarball \
          detector/detect detector/detect.sh detector/demo.sh; do
     [ -f "$STAGE/$f" ] || continue
     if LC_ALL=C grep -q "$(printf '\r')" "$STAGE/$f"; then
@@ -90,7 +90,8 @@ done
 # and the grader may unpack as another user. Sources must stay readable and the
 # four entry points must stay executable inside the archive.
 chmod -R a+rX,go-w "$STAGE"
-chmod 755 "$STAGE"/install "$STAGE"/elevate "$STAGE"/log "$STAGE"/remote
+chmod 755 "$STAGE"/install "$STAGE"/uninstall "$STAGE"/elevate \
+    "$STAGE"/log "$STAGE"/remote
 
 # shellcheck disable=SC2086  # LIST is a deliberate word list
 ( cd "$STAGE" && tar -cvf "$OUT" $LIST )

