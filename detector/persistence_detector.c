@@ -54,7 +54,6 @@ static const char *const persistence_files[] = {
     "/boot/loader.conf.local",
     "/boot/modules/rootkit.ko",
     "/boot/modules/hiding.ko",
-    "/dev/rootkit",
     NULL
 };
 
@@ -480,7 +479,7 @@ main(int argc, char **argv)
 
     if (argc == 2 && strcmp(argv[1], "--score") == 0) {
         print_score = 1;
-        
+
     } else if (argc != 1) {
         fprintf(stderr, "usage: %s [--score]\n", argv[0]);
         return 2;
