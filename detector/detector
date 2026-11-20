@@ -1,15 +1,53 @@
 #!/bin/sh
-DETECT_THRESHOLD=1
+
+set -u
+
+DETECT_THRESHOLD=10
 detect_point=0
-# Add more files here
-[ -f "syscall_hook_check.c" ]
+detector_positive=0
 
-cc -Wall -Wextra -lkvm -o syscall_hook_check syscall_hook_check.c
-[ -f "syscall_hook_check" ]
-[ -x "syscall_hook_check" ]
-./syscall_hook_check 1> /dev/null
+SCRIPT_DIR=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+BIN_DIR=${DETECTOR_BIN_DIR:-$SCRIPT_DIR}
 
-[ "$?" -eq 1 ] && detect_point=$((detect_point + 1))
+if [ "${DETECTOR_SKIP_BUILD:-0}" != "1" ]; then
+    cd "$SCRIPT_DIR" || exit 2
+    make -s persistence_detector process_detector syscall_hook_check || exit 2
+fi
 
-[ "$detect_point" -ge $DETECT_THRESHOLD ] && exit 1
+run_detector()
+{
+    label=$1
+    program=$2
+
+    score=$("$program" --score)
+    status=$?
+
+    case "$status" in
+        0) ;;
+        1) detector_positive=1 ;;
+        *)
+            echo "detector: $label check failed with status $status" >&2
+            exit "$status"
+            ;;
+    esac
+
+    case "$score" in
+        ''|*[!0-9]*)
+            echo "detector: $label check returned an invalid risk score" >&2
+            exit 2
+            ;;
+    esac
+
+    detect_point=$((detect_point + score))
+}
+
+run_detector persistence "$BIN_DIR/persistence_detector"
+run_detector process "$BIN_DIR/process_detector"
+run_detector syscall-hooks "$BIN_DIR/syscall_hook_check"
+
+if [ "$detector_positive" -eq 1 ] ||
+    [ "$detect_point" -ge "$DETECT_THRESHOLD" ]; then
+    exit 1
+fi
+
 exit 0

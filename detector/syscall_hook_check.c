@@ -2,6 +2,7 @@
 #include <kvm.h>
 #include <limits.h>
 #include <nlist.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,22 +11,37 @@
 #include <sys/syscall.h>
 
 #define SYSCALLS_SIZE 24
-#define THRESHOLD 3
+#define SYSCALL_DETECTION_THRESHOLD 3
 
 struct syscall_info {
     char *syscall_name;
     int syscall_num;
 };
 
+static int quiet = 0;
+
 int detect_syscall_hook(char *syscall_name, int syscall_num);
-int check_syscalls();
+int check_syscalls(void);
 
 int
 main(int argc, char *argv[])
 {
-    (void) argc;
-    (void) argv;
-    return check_syscalls();
+    int print_score = 0;
+    int score;
+
+    if (argc == 2 && strcmp(argv[1], "--score") == 0) {
+        print_score = 1;
+    } else if (argc != 1) {
+        fprintf(stderr, "usage: %s [--score]\n", argv[0]);
+        return 2;
+    }
+
+    quiet = print_score;
+    score = check_syscalls();
+    if (print_score)
+        printf("%d\n", score);
+
+    return score >= SYSCALL_DETECTION_THRESHOLD ? 1 : 0;
 }
 
 int 
@@ -36,6 +52,7 @@ detect_syscall_hook(char *syscall_name, int syscall_num) {
 
     unsigned long addr;
     int callnum;
+    int hooked;
     struct sysent call;
 
     nl[0].n_name = "sysent";
@@ -74,23 +91,23 @@ detect_syscall_hook(char *syscall_name, int syscall_num) {
     }
 
     /* Where does sysent[callnum].sy_call point to? */
-    printf("current sy_call pointer: %p, ", call.sy_call);
+    if (!quiet)
+        printf("current sy_call pointer: %p, ", call.sy_call);
 
     /* Check if that's correct. */
-    printf("expecting to point to 0x%lx. ", nl[1].n_value);
-    if ((uintptr_t)call.sy_call != nl[1].n_value) {
-        return 1;
-    }
+    if (!quiet)
+        printf("expecting to point to 0x%lx. ", nl[1].n_value);
+    hooked = (uintptr_t)call.sy_call != nl[1].n_value;
 
     if (kvm_close(kd) < 0) {
         fprintf(stderr, "ERROR: %s\n", kvm_geterr(kd));
         exit(-1);
     }
-    return 0;
+    return hooked;
 }
 
 int 
-check_syscalls() {
+check_syscalls(void) {
     struct syscall_info syscalls[SYSCALLS_SIZE] = {
         {.syscall_name = "sys_exit",            .syscall_num = SYS_exit},
         {.syscall_name = "sys_getdirentries",   .syscall_num = SYS_getdirentries},
@@ -119,16 +136,19 @@ check_syscalls() {
     };
     int count_sus = 0;
     for (int i = 0; i < SYSCALLS_SIZE; i++) {
-        printf("Checking %s: ", syscalls[i].syscall_name);
+        if (!quiet)
+            printf("Checking %s: ", syscalls[i].syscall_name);
         if (detect_syscall_hook(syscalls[i].syscall_name, 
                 syscalls[i].syscall_num)
         ) {
-            printf("BAD\n");
+            if (!quiet)
+                printf("BAD\n");
             ++count_sus;
         } else {
-            printf("GOOD\n");
+            if (!quiet)
+                printf("GOOD\n");
         }
     }
 
-    return count_sus >= THRESHOLD;
+    return count_sus;
 }

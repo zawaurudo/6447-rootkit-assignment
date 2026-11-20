@@ -451,7 +451,13 @@ static void scan_directory(const char *directory, enum dir_type type, int depth)
     closedir(dir);
 }
 
-int main(void) {
+static int
+persistence_detector_run(void)
+{
+    risk_score = 0;
+    scanned_modules_count = 0;
+    memset(scanned_modules, 0, sizeof(scanned_modules));
+
     scan_known_sus_paths();
 
     for (int i = 0; persistence_files[i] != NULL; i++) {
@@ -463,8 +469,26 @@ int main(void) {
 
     scan_directory("/boot/modules", DIR_MODULE, 0);
 
-    if (risk_score >= MIN_DETECTION_SCORE) {
-        return 1;
+    return risk_score;
+}
+
+int
+main(int argc, char **argv)
+{
+    int result;
+    int print_score = 0;
+
+    if (argc == 2 && strcmp(argv[1], "--score") == 0) {
+        print_score = 1;
+        
+    } else if (argc != 1) {
+        fprintf(stderr, "usage: %s [--score]\n", argv[0]);
+        return 2;
     }
-    return 0;
+
+    result = persistence_detector_run();
+    if (print_score)
+        printf("%d\n", result);
+
+    return result >= MIN_DETECTION_SCORE ? 1 : 0;
 }

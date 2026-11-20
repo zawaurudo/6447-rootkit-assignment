@@ -17,15 +17,23 @@
 #define DEFAULT_PID_MAX 99999
 #define MAX_PID 1000000
 #define MAX_BUFFER_SIZE (256U * 1024U * 1024U)
+#define PROCESS_DETECTION_THRESHOLD 5
+#define SUSPICIOUS_NAME_SCORE 1
+#define HIDDEN_PROCESS_SCORE PROCESS_DETECTION_THRESHOLD
+#define MAX_NAME_RISK (PROCESS_DETECTION_THRESHOLD - 1)
 
 struct suspect_process {
     struct timeval start_time;
     int found_via_query;
     int found_via_signal;
     int found_via_file_table;
+    int scored_suspicious_name;
+    int scored_query_hiding;
+    int scored_file_hiding;
 };
 
-static int detected = 0;
+static int risk_score = 0;
+static int name_risk_score = 0;
 
 static const char *sus_names[] = {
     "kmod_remote_listen",
@@ -48,10 +56,26 @@ static int is_sus_name(const char *name) {
 }
 
 static void
-report_sus_process(int pid, const char *reason)
+add_risk(int points)
 {
-    printf("[!] Suspicious process: PID %d (%s)\n", pid, reason);
-    detected = 1;
+    risk_score += points;
+}
+
+static void
+score_suspicious_name(int pid, const char *name,
+    struct suspect_process *sus_processes, int pid_max)
+{
+    int points;
+
+    if (!is_sus_name(name) || pid < 1 || pid > pid_max ||
+        sus_processes[pid].scored_suspicious_name) {
+        return;
+    }
+
+    sus_processes[pid].scored_suspicious_name = 1;
+    points = name_risk_score < MAX_NAME_RISK ? SUSPICIOUS_NAME_SCORE : 0;
+    name_risk_score += points;
+    add_risk(points);
 }
 
 static void * read_sysctl(const int *mib, int mib_len, size_t *size) {
@@ -108,7 +132,8 @@ static void * read_sysctl(const int *mib, int mib_len, size_t *size) {
 }
 
 static int
-get_processes(unsigned char *seen, int pid_max)
+get_processes(unsigned char *seen, struct suspect_process *sus_processes,
+    int pid_max)
 {
     int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PROC };
     size_t bytes;
@@ -138,8 +163,8 @@ get_processes(unsigned char *seen, int pid_max)
             seen[proc->ki_pid] = 1;
         }
 
-        if (is_sus_name(proc->ki_comm))
-            report_sus_process(proc->ki_pid, "suspicious name");
+        score_suspicious_name(proc->ki_pid, proc->ki_comm,
+            sus_processes, pid_max);
     }
 
     free(processes);
@@ -239,22 +264,16 @@ static int scan_processes(void) {
         goto cleanup;
     }
 
-    if (get_processes(process1, pid_max) == -1) {
+    if (get_processes(process1, sus_processes, pid_max) == -1) {
         fprintf(stderr, "Failed to get process list\n");
         goto cleanup;
     }
-
-    if (detected)
-        goto cleanup;
 
     for (int pid = 1; pid <= pid_max; pid++) {
         if (!get_process_by_pid(pid, &proc))
             continue;
 
-        if (is_sus_name(proc.ki_comm)) {
-            report_sus_process(pid, "suspicious name");
-            goto cleanup;
-        }
+        score_suspicious_name(pid, proc.ki_comm, sus_processes, pid_max);
 
         if (!process1[pid]) {
             sus_processes[pid].found_via_query = 1;
@@ -276,7 +295,7 @@ static int scan_processes(void) {
         }
     }
 
-    if (get_processes(process2, pid_max) == -1) {
+    if (get_processes(process2, sus_processes, pid_max) == -1) {
         fprintf(stderr, "Failed to get second process list\n");
         goto cleanup;
     }
@@ -291,18 +310,19 @@ static int scan_processes(void) {
         if (!get_process_by_pid(pid, &proc))
             continue;
 
-        if (is_sus_name(proc.ki_comm))
-            report_sus_process(pid, "suspicious name");
+        score_suspicious_name(pid, proc.ki_comm, sus_processes, pid_max);
 
         if (sus_processes[pid].start_time.tv_sec == proc.ki_start.tv_sec &&
-            sus_processes[pid].start_time.tv_usec == proc.ki_start.tv_usec) {
-            report_sus_process(pid, "hidden from process list");
+            sus_processes[pid].start_time.tv_usec == proc.ki_start.tv_usec &&
+            !sus_processes[pid].scored_query_hiding) {
+            sus_processes[pid].scored_query_hiding = 1;
+            add_risk(HIDDEN_PROCESS_SCORE);
         }
     }
 
     if (files_available &&
         get_file_owners(files2, pid_max) == 0 &&
-        get_processes(process3, pid_max) == 0) {
+        get_processes(process3, sus_processes, pid_max) == 0) {
 
         for (int pid = 1; pid <= pid_max; pid++) {
             if (!sus_processes[pid].found_via_file_table)
@@ -320,7 +340,11 @@ static int scan_processes(void) {
             if (!does_process_exist(pid))
                 continue;
 
-            report_sus_process(pid, "hidden process owns open files");
+            if (sus_processes[pid].scored_file_hiding)
+                continue;
+
+            sus_processes[pid].scored_file_hiding = 1;
+            add_risk(HIDDEN_PROCESS_SCORE);
         }
     }
 
@@ -332,15 +356,33 @@ cleanup:
     free(files2);
     free(sus_processes);
 
-    return detected;
+    return risk_score;
+}
+
+static int
+process_detector_run(void)
+{
+    risk_score = 0;
+    name_risk_score = 0;
+    return scan_processes();
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
-    if (scan_processes()) {
-        return 1;
+    int result;
+    int print_score = 0;
+
+    if (argc == 2 && strcmp(argv[1], "--score") == 0) {
+        print_score = 1;
+    } else if (argc != 1) {
+        fprintf(stderr, "usage: %s [--score]\n", argv[0]);
+        return 2;
     }
 
-    return 0;
+    result = process_detector_run();
+    if (print_score)
+        printf("%d\n", result);
+
+    return result >= PROCESS_DETECTION_THRESHOLD ? 1 : 0;
 }

