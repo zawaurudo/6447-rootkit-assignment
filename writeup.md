@@ -68,12 +68,12 @@ Do not iterate by `kldunload rootkit`: the UDP listener thread from `rootkit.c` 
 
 | Area | Change |
 |---|---|
-| Hiding | No code changed, only its location. The tree moved under `rootkit/` after the midpoint, so the concealment now sits in `rootkit/kernel/rootkit.c` and `rootkit/hiding/hiding.c`. The first registers `sys/kld_hiding` and `sys/port_hiding` on the main module, the second is the standalone `KMOD= hiding` prototype. The two are still byte-for-byte duplicates. |
+| Hiding | No code changed, only its location. The tree moved under `rootkit/` after the midpoint, so the concealment now sits in `rootkit/kernel/rootkit.c` and `rootkit/hiding/hiding.c`. The first registers `sys/kld_hiding` and `sys/port_hiding` on the main module, the second is the standalone `KMOD= hiding` prototype. The standalone copy carries the same two helpers but has since diverged from the version inside `rootkit.c`. |
 | Detection | New: `detector/`, a kernel module plus a userland script, described below. Nothing under `rootkit/` was changed to accommodate it. |
 
 ## Detection design
 
-Detection is split by area across three PRs. This one covers kernel modules and the network side. Filesystem checks, processes and persistence artefacts, device nodes, logs and syscall integrity belong to the other two.
+Detection is one tree, `detector/`, and both halves of my area are in it: `kmod/detector.c` reads what userland cannot see honestly, `detect.sh` does the `kld_list` bookkeeping and the processless-socket check, and `./detect` folds every check into a single risk score. The filesystem and persistence artefacts, the process table, and syscall integrity are the three userland checkers sitting next to them; they were separate PRs and are merged into the same directory now.
 
 ### Why a kernel module
 

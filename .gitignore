@@ -31,5 +31,10 @@ detector/kmod/i386
 rootkit/user/elevate
 rootkit/user/hide_kld
 rootkit/kernel/revshell
+detector/persistence_detector
+detector/process_detector
+detector/syscall_hook_check
+detector/port_hide
+detector/syscall_check/syscall_check
 exfil.log
 remote_bin

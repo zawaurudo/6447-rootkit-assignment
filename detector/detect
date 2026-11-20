@@ -28,8 +28,12 @@ run_detector()
         0) ;;
         1) detector_positive=1 ;;
         *)
+            # The checker could not run (no kernel memory, missing binary).
+            # Its own exit code is meaningless here -- a shell that cannot
+            # exec reports 126/127, kvm failures used to come back as 255 --
+            # and callers only distinguish 0 from 1 from 2. Never pass it on.
             echo "detector: $label check failed with status $status" >&2
-            exit "$status"
+            exit 2
             ;;
     esac
 

@@ -48,6 +48,8 @@
 #include <sys/sockopt.h>
 #include <sys/linker.h>
 #include <sys/file.h>
+#include <sys/ck.h>
+#include <sys/atomic.h>
 
 #include <vm/vm.h>
 #include <vm/pmap.h>
@@ -55,6 +57,7 @@
 #include <vm/vm_map.h>
 #include <vm/vm_param.h>
 #include <machine/vmparam.h>
+#include <machine/clock.h>		/* DELAY() */
 
 #include <net/vnet.h>
 #include <netinet/in.h>
@@ -62,8 +65,8 @@
 #include <netinet/tcp_var.h>
 #include <netinet/udp_var.h>
 
-#define DET_WALK_MAX		200000	/* hard stop for the kernel_map walk */
-extern void DELAY(int usec);		/* sys/systm.h does not pull it in here */
+#define DET_LF_MAX		64	/* linker_files recorded per census */
+#define DET_SHOW_MAX		8	/* ranges printed per finding */
 #define DET_SAMPLES		3
 #define DET_MODULE_MAX		(64UL * 1024 * 1024)	/* module text cap */
 
@@ -138,22 +141,71 @@ det_kernel_image(struct det_kimage *ki)
 }
 
 /*
- * Everything executable in kernel_map came from a module. The address alone
- * can't separate a legitimate module from a hidden one, so this is a census
- * and not a verdict: one quiet line on a clean host, and it only becomes
- * interesting once something has named the code it is counting.
+ * Everything executable in kernel_map came from a module -- or from something
+ * that unlinked itself from the module list. The address alone cannot separate
+ * the two, so the census is cross-checked against linker_files: a mapping that
+ * no linker_file claims is the case that earns a confirmed, and a mapping a
+ * live linker_file does claim is exactly what a legitimate .ko looks like.
  *
- * vm_map is an rbtree here and following entry->left out of a module doesn't
- * terminate (found that out the hard way), so the walk goes by address
- * through vm_map_lookup_entry(), which is the kernel's own search.
+ * Two ordering rules matter here:
+ *
+ *   - linker_file_foreach() takes kld_sx exclusively. kldload() holds kld_sx
+ *     and then takes kernel_map, so the module list has to be sampled before
+ *     kernel_map is locked, never inside it.
+ *   - vm_map is an rbtree and following entry->left out of a module does not
+ *     terminate, so the walk uses VM_MAP_ENTRY_FOREACH(), which goes through
+ *     vm_map_entry_succ() and stops on the map header. That also makes
+ *     `continue' safe here, which the old hand-rolled address walk could not
+ *     use because the advance lived at the bottom of its loop body.
  */
+
+struct det_lfranges {
+	vm_offset_t	start[DET_LF_MAX];
+	vm_offset_t	end[DET_LF_MAX];
+	int		n;
+};
+
+static int
+det_lf_record(linker_file_t lf, void *arg)
+{
+	struct det_lfranges *fr;
+
+	fr = arg;
+	if (lf->address == NULL || lf->size == 0)
+		return (0);		/* preloaded stub, nothing mapped */
+	if (fr->n >= DET_LF_MAX)
+		return (1);		/* array full, stop the iteration */
+	fr->start[fr->n] = (vm_offset_t)(uintptr_t)lf->address;
+	fr->end[fr->n] = (vm_offset_t)(uintptr_t)lf->address + lf->size;
+	fr->n++;
+	return (0);
+}
+
+static int
+det_claimed(const struct det_lfranges *fr, vm_offset_t start, vm_offset_t end)
+{
+	int i;
+
+	for (i = 0; i < fr->n; i++) {
+		if (start >= fr->start[i] && end <= fr->end[i])
+			return (1);
+	}
+	return (0);
+}
+
+struct det_range {
+	vm_offset_t	start;
+	vm_offset_t	end;
+};
 
 static void
 det_scan_modules(const struct det_kimage *ki)
 {
-	vm_offset_t	 addr, limit;
-	vm_map_entry_t	 e;
-	int		 outside, listed, total, nexec, guard;
+	struct det_lfranges	 fr;
+	struct det_range	 shown[DET_SHOW_MAX];
+	vm_offset_t		 limit;
+	vm_map_entry_t		 e;
+	int			 total, nexec, unclaimed, nshown, i;
 
 	if (!ki->valid) {
 		det_finding("module", "suspect", "low",
@@ -162,11 +214,13 @@ det_scan_modules(const struct det_kimage *ki)
 		return;
 	}
 
-	outside = 0;
-	listed = 0;
+	bzero(&fr, sizeof(fr));
+	linker_file_foreach(det_lf_record, &fr);
+
 	total = 0;
 	nexec = 0;
-	addr = ki->start;
+	unclaimed = 0;
+	nshown = 0;
 	/* Modules sit right after the image and every step of this is an
 	 * rbtree search, so keep the window tight - an unbounded range turns
 	 * the check into a minute of emulated kernel work. */
@@ -174,59 +228,70 @@ det_scan_modules(const struct det_kimage *ki)
 	if (limit > (vm_offset_t)VM_MAX_KERNEL_ADDRESS)
 		limit = (vm_offset_t)VM_MAX_KERNEL_ADDRESS;
 
+	/*
+	 * No printf while kernel_map is read-locked: printf may sleep and the
+	 * holder of a map read lock may not. Collect the first few ranges and
+	 * report them after the unlock.
+	 */
 	vm_map_lock_read(kernel_map);
-	guard = 0;
-	while (addr < limit && vm_map_lookup_entry(kernel_map, addr, &e)) {
-		if (++guard > DET_WALK_MAX)
-			break;			/* never spin on a stale map */
+	VM_MAP_ENTRY_FOREACH(e, kernel_map) {
+		if (e->start >= limit)
+			break;
+		if (e->end <= ki->start)
+			continue;	/* below the image: pmap leftovers */
 		total++;
-		if (e->end <= addr)
-			break;			/* corrupt entry, stop */
-		if ((e->protection & VM_PROT_EXECUTE) != 0 &&
-		    (e->end - e->start) >= PAGE_SIZE &&
-		    (e->end - e->start) <= DET_MODULE_MAX) {
-			nexec++;
-			/* No `continue' here: it would skip the advance at
-			 * the bottom of the loop, the entry holding this
-			 * very function would come back on the next lookup
-			 * and the walk would spin. Costs one indented if,
-			 * saves an afternoon. */
-			if (!((vm_offset_t)(uintptr_t)&det_scan_modules >=
-			    e->start && (vm_offset_t)(uintptr_t)&det_scan_modules
-			    < e->end)) {
-				if (e->end <= ki->start || e->start >= ki->end) {
-					outside++;
-					if (listed++ < 8) {
-						det_finding("module", "suspect",
-						    "low", "executable mapping "
-						    "0x%jx-0x%jx (%ju bytes) lies "
-						    "outside the kernel image: text "
-						    "of a loaded module, or of one "
-						    "that unlinked itself from the "
-						    "module list",
-						    (uintmax_t)e->start,
-						    (uintmax_t)e->end,
-						    (uintmax_t)(e->end - e->start));
-					}
-				}
-			}
+		if ((e->protection & VM_PROT_EXECUTE) == 0)
+			continue;
+		if ((e->end - e->start) < PAGE_SIZE)
+			continue;
+		nexec++;
+		if (e->start >= ki->start && e->end <= ki->end)
+			continue;	/* the statically linked kernel */
+		if (det_claimed(&fr, e->start, e->end))
+			continue;	/* a module that is still on the list */
+		unclaimed++;
+		if (nshown < DET_SHOW_MAX) {
+			shown[nshown].start = e->start;
+			shown[nshown].end = e->end;
+			nshown++;
 		}
-		addr = e->end;
 	}
 	vm_map_unlock_read(kernel_map);
 
 	if (det_verbose)
 		printf("DETECTOR module census entries=%d exec=%d "
-		    "outside_image=%d\n", total, nexec, outside);
+		    "linker_files=%d unclaimed=%d\n", total, nexec, fr.n,
+		    unclaimed);
 
-	if (det_verbose && outside == 0)
-		printf("DETECTOR module status=clean conf=high evidence=\"no "
-		    "executable mapping outside the kernel image (%d entries "
-		    "walked, %d executable)\"\n", total, nexec);
-	else if (outside > 8)
+	/*
+	 * A full array means the census does not know about every linker_file,
+	 * so "unclaimed" turns into an over-count. Say so instead of printing
+	 * a confirmed finding per legitimate module.
+	 */
+	if (fr.n >= DET_LF_MAX)
 		det_finding("module", "suspect", "low",
-		    "%d executable mappings outside the kernel image, first 8 "
-		    "listed", outside);
+		    "more than %d linker_files; only the first %d were "
+		    "recorded, so mappings below may be over-counted",
+		    DET_LF_MAX, DET_LF_MAX);
+
+	for (i = 0; i < nshown; i++)
+		det_finding("module", "confirmed", "high",
+		    "executable mapping 0x%jx-0x%jx (%ju bytes) belongs to no "
+		    "linker_file: the code is mapped, the module that owns it "
+		    "is not on the list", (uintmax_t)shown[i].start,
+		    (uintmax_t)shown[i].end,
+		    (uintmax_t)(shown[i].end - shown[i].start));
+
+	if (unclaimed > DET_SHOW_MAX)
+		det_finding("module", "confirmed", "high",
+		    "%d executable mappings belong to no linker_file, first %d "
+		    "listed", unclaimed, DET_SHOW_MAX);
+
+	if (unclaimed == 0 && det_verbose)
+		printf("DETECTOR module status=clean conf=high evidence=\"every "
+		    "executable mapping outside the kernel image is claimed by a "
+		    "linker_file (%d walked, %d executable, %d files)\"\n",
+		    total, nexec, fr.n);
 }
 
 /* check 2: inpcb lists vs ipi_count */
@@ -235,11 +300,26 @@ det_scan_modules(const struct det_kimage *ki)
 static int
 det_pcb_walk(struct inpcbinfo *ipi)
 {
-	struct inpcb	*inp;
-	int		 n;
+	struct inpcb_iterator	 it = INP_ALL_ITERATOR(ipi, INPLOOKUP_RLOCKPCB);
+	struct inpcb		*inp;
+	int			 n;
 
+	/*
+	 * in_pcb.h's iterator instead of a bare CK_LIST_FOREACH: it takes the
+	 * per-pcb lock (INPLOOKUP_RLOCKPCB) or an SMR reference around each
+	 * element. The raw list walk raced two writers -- rootkit's
+	 * port_hiding() unlinks under INP_INFO_WLOCK without freeing, so
+	 * in_pcbfree() will CK_LIST_REMOVE the same node a second time, and
+	 * in_pcbfree() itself runs concurrently on any busy host.
+	 *
+	 * The loop runs all the way to NULL on purpose: inp_next() drops the
+	 * per-pcb lock and the ipi runlock on its way out, so leaving early
+	 * would leak both. It also advances across hash buckets rather than
+	 * following inp_list by hand, which is what kept the old walk from
+	 * looping on a node the rootkit had relinked.
+	 */
 	n = 0;
-	CK_LIST_FOREACH(inp, &ipi->ipi_listhead, inp_list)
+	while ((inp = inp_next(&it)) != NULL)
 		n++;
 	return (n);
 }
@@ -285,10 +365,14 @@ det_scan_pcbs(void)
 	 * before anything is called confirmed.
 	 */
 	for (i = 0; i < DET_SAMPLES; i++) {
-		CURVNET_SET(TD_TO_VNET(curthread));
+		/*
+		 * V_tcbinfo already resolves through the current vnet, and a
+		 * sysctl handler runs in its caller's. Re-deriving it with
+		 * TD_TO_VNET(curthread) picked the prison's vnet instead,
+		 * which is a different table whenever the caller is jailed.
+		 */
 		det_pcb_table(&V_tcbinfo, "tcp", i, &tcp[i]);
 		det_pcb_table(&V_udbinfo, "udp", i, &udp[i]);
-		CURVNET_RESTORE();
 
 		if (i + 1 < DET_SAMPLES)
 			DELAY(100000);	/* 100 ms; busy-wait, so no sleep to hang in */
@@ -324,10 +408,28 @@ det_scan_pcbs(void)
  */
 static int	det_pcb_enabled = 1;
 
-static void
+static u_int		det_busy;		/* a pass is in progress */
+
+static int
 det_run_pass(void)
 {
 	struct det_kimage	ki;
+
+	/*
+	 * One pass at a time. The pass walks kernel_map and the pcb lists
+	 * with locks held, and it prints; two concurrent sysctl writes used
+	 * to interleave their findings into one summary. The same flag is
+	 * what MOD_UNLOAD checks, so an unload cannot race a live pass.
+	 *
+	 * Returning EBUSY matters: the caller is about to read
+	 * kern.detector.summary, and a skipped pass would hand it the counts
+	 * from the previous run instead of an error.
+	 */
+	if (!atomic_cmpset_int(&det_busy, 0, 1)) {
+		printf("DETECTOR pass status=skipped conf=low evidence=\"another "
+		    "pass is already running\"\n");
+		return (EBUSY);
+	}
 
 	det_confirmed = 0;
 	det_suspect = 0;
@@ -344,6 +446,9 @@ det_run_pass(void)
 
 	printf("DETECTOR summary confirmed=%d suspect=%d\n",
 	    det_confirmed, det_suspect);
+
+	atomic_store_rel_int(&det_busy, 0);
+	return (0);
 }
 
 static int
@@ -356,8 +461,7 @@ det_scan_sysctl(SYSCTL_HANDLER_ARGS)
 	if (err != 0 || req->newptr == NULL)
 		return (err);
 
-	det_run_pass();
-	return (0);
+	return (det_run_pass());
 }
 
 SYSCTL_PROC(_kern_detector, OID_AUTO, scan,
@@ -396,9 +500,9 @@ detector_modevent(module_t mod, int what, void *arg)
 		 *
 		 *   - inline in MOD_LOAD: kldload never returns, the linker
 		 *     still holds kernel_map;
-		 *   - from a callout: that context may not sleep and rw_rlock()
-		 *     can, so the pass wedges - and it wedges holding the msgbuf
-		 *     lock, which means even dmesg(8) blocks;
+		 *   - from a callout: that context may not sleep and
+		 *     vm_map_lock_read() can, so the pass wedges - and it wedges
+		 *     holding the msgbuf lock, which means even dmesg(8) blocks;
 		 *   - from taskqueue_thread: not reliable this early
 		 *     (SI_SUB_DRIVERS).
 		 *
@@ -410,6 +514,14 @@ detector_modevent(module_t mod, int what, void *arg)
 		 */
 		return (0);
 	case MOD_UNLOAD:
+		/*
+		 * Refuse while a pass is running. det_run_pass() executes this
+		 * file's text and kldunload() would unmap it under the thread
+		 * currently inside it -- the old unconditional `return (0)'
+		 * unmapped the module in the middle of the kernel_map walk.
+		 */
+		if (!atomic_cmpset_int(&det_busy, 0, 1))
+			return (EBUSY);
 		return (0);
 	default:
 		return (EOPNOTSUPP);

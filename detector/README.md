@@ -30,7 +30,7 @@ sudo kldunload detector
 
 `kldload` does not scan by itself. The load path comes in with `kernel_map` already held, and the pass needs the same map. Scanning there deadlocks `kldload` until the box reboots. `detector_modevent()` has the three attempts that led to that conclusion.
 
-`sh detect.sh` prints the full report, `sh detect.sh -q` prints the summary line only. `./detect` runs everything and exits non-zero once the risk score reaches the threshold; it only calls `detect.sh` on FreeBSD (`DETECTOR_SKIP_SCRIPT_CHECKS=1` turns that off). `sh demo.sh` runs phase 1 and changes nothing. `DETECTOR_INSTALL_ROOTKIT=1 sh demo.sh` adds phases 2 and 3, and should only run on a throwaway VM.
+`sh detect.sh` prints the full report, `sh detect.sh -q` prints the summary line only. `./detect` runs everything and exits non-zero once the risk score reaches the threshold; it only calls `detect.sh` on FreeBSD (`DETECTOR_SKIP_SCRIPT_CHECKS=1` turns that off). `sh demo.sh` runs phases 1, 1b and 1c: it loads `detector.ko` (so it needs root on FreeBSD) and writes the userland report to `/tmp/detector-userland.txt`, but it installs nothing and changes no host state beyond that. `DETECTOR_INSTALL_ROOTKIT=1 sh demo.sh` adds phases 2 and 3, and should only run on a throwaway VM.
 
 ## Output
 
@@ -109,7 +109,7 @@ Everything above was measured on 2026-11-16 in a QEMU FreeBSD 14.5 VM (`kern.osr
 
 The VM had two vCPUs, but only for compiling. Under TCG the kernel trips its `spin lock held too long` watchdog within a few minutes of SMP load, so every scan ran on one vCPU.
 
-Row 2 is the row that matters for the marking. A host carrying a dozen legitimate modules must not read as compromised, and that is the whole reason the census is `suspect` and nothing more.
+Row 2 is the row that matters for the marking. A host carrying a dozen legitimate modules must not read as compromised, so the census cross-checks every executable mapping against `linker_files` before it says anything. A mapping that some live `linker_file` claims is a module doing its job and stays silent; only a mapping none of them claims is a confirmed finding. That is what separates a census from a verdict.
 
 ## What I found about our own concealment
 
@@ -117,7 +117,7 @@ Row 2 is the row that matters for the marking. A host carrying a dozen legitimat
 
 So `port_hide 4444` on a host with no TCP traffic on port 4444 matches nothing. When it does match, it hides the wrong pcb.
 
-What that looks like in practice: `sockstat -U` still lists the listening UDP socket, with `???` where the process should be, while the TCP counter check stays clean. So the socket gets caught by the processless-socket line, and the code behind it by the census.
+What that looks like in practice: `sockstat -U` still lists the listening UDP socket, with a single `?` where the process should be, while the TCP counter check stays clean. So the socket gets caught by the processless-socket line, and the code behind it by the census.
 
 Pointing `port_hiding()` at `V_udbinfo` would make the delta check fire. It would also leave a `CK_LIST_REMOVE()` without `in_pcbdrop()`, which is a use-after-free waiting for the socket to close. That defect is not mine to change, and it is written up in `../writeup.md`.
 
@@ -127,16 +127,26 @@ Two places depend on the release.
 
 `det_kernel_image()` reads `linker_kernel_file->address` and `.size`. That size is set from `__endkernel - __startkernel` (`link_elf.c:482`), so the bounds stay correct across builds without hardcoding anything.
 
-`det_scan_modules()` depends on the map layout. On 14.x `kernel_map` is an rbtree: `struct vm_map_entry` has `left` and `right`, and `map->root` is the root. Following those links from inside a module does not terminate, which cost me an afternoon. The walk goes by address instead, using the kernel's own `vm_map_lookup_entry()` to find the next entry.
+`det_scan_modules()` depends on how the module list and the map are reached, and both changed in 14.x:
+
+- `linker_files` is `static` in `kern_linker.c:117`, so `extern` does not link (`Unresolved symbol`). `linker_file_foreach()` is the public way in: it takes `kld_sx` itself and hands each `struct linker_file` to a predicate. It has to run *before* `kernel_map` is locked, because `kldload()` takes `kld_sx` first and `kernel_map` second; doing it the other way round is a lock-order reversal.
+- `kernel_map` is an rbtree. Following `entry->right`/`entry->left` from inside a module does not terminate, which cost me an afternoon. `VM_MAP_ENTRY_FOREACH()` (`vm_map.h:519`) is the supported walk: `vm_map_entry_first()` plus `vm_map_entry_succ()`, stopping on `&map->header`. It also makes `continue` safe, which the older address-at-a-time walk through `vm_map_lookup_entry()` could not use, because the advance lived at the bottom of the loop body.
+
+`det_scan_pcbs()` walks with `inp_next()` and `INP_ALL_ITERATOR()` from `in_pcb.h:718`, not a bare `CK_LIST_FOREACH`. The iterator pairs SMR with a per-pcb lock, and it releases both on the call that finally returns `NULL`, so the loop must run to the end rather than `break` early. On 14.5 `rootkit`'s `port_hiding()` unlinks under `INP_INFO_WLOCK` without freeing the pcb, and `in_pcbfree()` will `CK_LIST_REMOVE()` the same node a second time — a raw list walk races both.
 
 ## Files
 
 | File | What it is |
 |---|---|
-| `detector.c` | the module: `det_scan_modules()`, `det_scan_pcbs()` |
-| `Makefile` | `bsd.kmod.mk`, nothing else |
-| `detect.sh` | userland half: `kld_list` bookkeeping, processless sockets |
-| `demo.sh` | phase 1 clean host, phases 2 and 3 rootkit and concealment |
+| `detect` | the entry point: runs every check, adds up the scores, prints the verdict |
+| `detect.sh` | shell half: `kld_list` bookkeeping, sockets with no owning process |
+| `kmod/detector.c` | the kernel module: `det_scan_modules()`, `det_scan_pcbs()` |
+| `kmod/Makefile` | `bsd.kmod.mk`, nothing else (`make kmod` from `detector/`) |
+| `persistence_detector.c` | `kld_list` entries that do not resolve, and kernel objects under `/boot/modules` |
+| `process_detector.c` | process-table consistency |
+| `syscall_hook_check.c` | compares the live `sysent` table against the on-disk kernel's |
+| `syscall_check/` | wrapper for the above, plus its notes |
+| `demo.sh` | phase 1 clean host, phase 1b userland half, phase 1c the entry point, phases 2 and 3 rootkit and concealment |
 | `port_hide.c` | calls `sys/port_hiding` so the demo can switch concealment on |
 
 `port_hide.c` lives here rather than in `rootkit/` so that `rootkit/` stays byte-identical to what the group handed in.

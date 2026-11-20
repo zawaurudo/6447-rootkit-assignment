@@ -76,7 +76,10 @@ done
 # module). Honest examples exist, NFS client and netgraph among them, which is
 # why this is low confidence and why the module's ipi_count check is the one
 # that gets to say confirmed.
-_orphans=$(sockstat -4 2>/dev/null | awk 'NR > 1 && $1 == "???"' | head -5)
+# sockstat prints a single "?" in the USER column when nothing owns the
+# socket (usr.bin/sockstat/sockstat.c, the "?"/"?"/"?" xprintf fallback).
+# Matching "???" here never fired once.
+_orphans=$(sockstat -4 2>/dev/null | awk 'NR > 1 && $1 == "?"' | head -5)
 if [ -n "$_orphans" ]; then
 	_n=$(printf '%s\n' "$_orphans" | wc -l | tr -d ' ')
 	while IFS= read -r _line; do

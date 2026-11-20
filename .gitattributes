@@ -1,0 +1,16 @@
+# Everything in this repo is consumed by a FreeBSD shell, C compiler or make.
+# A CRLF here turns "#!/bin/sh" into "#!/bin/sh^M" and the grader's first
+# command fails with "not found". Normalise on checkout and on commit.
+* text=auto eol=lf
+
+*.sh           text eol=lf
+*.c            text eol=lf
+*.h            text eol=lf
+*.md           text eol=lf
+Makefile       text eol=lf
+*.mk           text eol=lf
+
+# No trailing-newline or encoding guessing on binaries.
+*.ko           binary
+*.o            binary
+*.tar          binary

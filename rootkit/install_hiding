@@ -1,9 +1,23 @@
 #!/bin/sh
-pwd
-cd "kernel/hiding"
-make 
-kldload ./hiding.ko
 
-cd ../../user
-clang hide_kld.c -o hide_kld
-./hide_kld
+# Builds and loads the standalone hiding prototype (hiding/hiding.c).
+#
+# This is the separate `KMOD= hiding` demo: it conceals a module name and a
+# port, nothing else. rootkit.ko carries the same two functions alongside the
+# device, the syscall hooks and the log. Use this one to show the concealment
+# on its own, without loading the full rootkit.
+#
+# The paths used to be relative to an assumed working directory
+# ("cd kernel/hiding"), which only worked if you happened to be sitting in a
+# particular parent. They are anchored on the script now.
+
+set -eu
+
+HERE=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+
+( cd "$HERE/hiding" && make )
+
+kldstat -q -m hiding || kldload "$HERE/hiding/hiding.ko"
+
+"${CC:-cc}" -O2 -o "$HERE/user/hide_kld" "$HERE/user/hide_kld.c"
+"$HERE/user/hide_kld"

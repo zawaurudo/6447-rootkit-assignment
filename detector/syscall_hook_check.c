@@ -38,13 +38,29 @@ main(int argc, char *argv[])
 
     quiet = print_score;
     score = check_syscalls();
+    if (score < 0) {
+        /*
+         * The check itself could not run. Returning a score here would tell
+         * the caller "this host is clean" about a question we never asked,
+         * so say so and leave through the "cannot tell" door.
+         */
+        fprintf(stderr, "syscall_hook_check: cannot read kernel memory "
+            "(run as root, or as a member of the kmem group)\n");
+        return 2;
+    }
+
     if (print_score)
         printf("%d\n", score);
 
     return score >= SYSCALL_DETECTION_THRESHOLD ? 1 : 0;
 }
 
-int 
+/*
+ * Returns 1 for a hooked syscall, 0 for a clean one, and -1 when the kernel
+ * memory could not be read at all. -1 is not a detection and must never be
+ * folded into the score.
+ */
+int
 detect_syscall_hook(char *syscall_name, int syscall_num) {
     char errbuf[_POSIX2_LINE_MAX];
     kvm_t *kd;
@@ -54,40 +70,56 @@ detect_syscall_hook(char *syscall_name, int syscall_num) {
     int callnum;
     int hooked;
     struct sysent call;
+    ssize_t nread;
 
     nl[0].n_name = "sysent";
     nl[1].n_name = syscall_name;
     callnum = syscall_num;
 
-    kd = kvm_openfiles(NULL, NULL, NULL, O_RDWR, errbuf);
+    /*
+     * O_RDONLY: this only reads. Asking for write access made /dev/mem the
+     * gate, so the whole detector turned into a root-only tool that printed
+     * nothing at all for an ordinary user.
+     */
+    kd = kvm_openfiles(NULL, NULL, NULL, O_RDONLY, errbuf);
     if (!kd) {
         fprintf(stderr, "ERROR: %s\n", errbuf);
-        exit(-1);
+        return (-1);
     }
 
     /* Find the address of sysent[] and name of syscall */
     if (kvm_nlist(kd, nl) < 0) {
         fprintf(stderr, "ERROR: %s\n", kvm_geterr(kd));
-        exit(-1);
+        (void)kvm_close(kd);
+        return (-1);
     }
 
     if (!(nl[0].n_value)) {
         fprintf(stderr, "ERROR: %s not found (very weird...)\n",
             nl[0].n_name);
-        exit(-1);
+        (void)kvm_close(kd);
+        return (-1);
     }
 
     if (!nl[1].n_value) {
         fprintf(stderr, "ERROR: %s not found\n", nl[1].n_name);
-        exit(-1);
+        (void)kvm_close(kd);
+        return (-1);
     }
 
     /* Determine the address of sysent[callnum]. */
     addr = nl[0].n_value + callnum * sizeof(struct sysent);
     /* Copy sysent[callnum]. */
-    if (kvm_read(kd, addr, &call, sizeof(struct sysent)) < 0) {
-        fprintf(stderr, "ERROR: %s\n", kvm_geterr(kd));
-        exit(-1);
+    nread = kvm_read(kd, addr, &call, sizeof(struct sysent));
+    if (nread != (ssize_t)sizeof(struct sysent)) {
+        /*
+         * A short read leaves the tail of `call` uninitialised, and comparing
+         * garbage is how a clean host starts reporting hooks.
+         */
+        fprintf(stderr, "ERROR: short read of sysent[%d]: %zd of %zu bytes\n",
+            callnum, nread, sizeof(struct sysent));
+        (void)kvm_close(kd);
+        return (-1);
     }
 
     /* Where does sysent[callnum].sy_call point to? */
@@ -99,9 +131,13 @@ detect_syscall_hook(char *syscall_name, int syscall_num) {
         printf("expecting to point to 0x%lx. ", nl[1].n_value);
     hooked = (uintptr_t)call.sy_call != nl[1].n_value;
 
+    /*
+     * kvm_geterr() hands back a pointer into the handle, so it has to be read
+     * before kvm_close() -- doing it after is a use-after-free.
+     */
     if (kvm_close(kd) < 0) {
-        fprintf(stderr, "ERROR: %s\n", kvm_geterr(kd));
-        exit(-1);
+        fprintf(stderr, "ERROR: kvm_close failed\n");
+        return (-1);
     }
     return hooked;
 }
@@ -138,11 +174,18 @@ check_syscalls(void) {
     };
     int count_sus = 0;
     for (int i = 0; i < SYSCALLS_SIZE; i++) {
+        int hooked;
         if (!quiet)
             printf("Checking %s: ", syscalls[i].syscall_name);
-        if (detect_syscall_hook(syscalls[i].syscall_name, 
-                syscalls[i].syscall_num)
-        ) {
+        hooked = detect_syscall_hook(syscalls[i].syscall_name,
+                syscalls[i].syscall_num);
+        if (hooked < 0) {
+            /* One unreadable sysent means the whole table is unreadable. */
+            if (!quiet)
+                printf("ERROR\n");
+            return (-1);
+        }
+        if (hooked) {
             if (!quiet)
                 printf("BAD\n");
             ++count_sus;

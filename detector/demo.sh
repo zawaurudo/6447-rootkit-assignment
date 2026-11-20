@@ -13,7 +13,8 @@
 # because kldunload on this module panics (see writeup.md), so the box is gone
 # afterwards.
 #
-# ./demo.sh                          phase 1 only, no side effects
+# ./demo.sh                          phases 1 and 1b: loads detector.ko,
+#                                    writes /tmp/detector-userland.txt
 # DETECTOR_INSTALL_ROOTKIT=1 ./demo.sh
 #
 # ROOTKIT_DIR=/path/to/6447-rootkit-assignment-main/rootkit
@@ -71,6 +72,16 @@ sh "$HERE/detect.sh" | tee /tmp/detector-userland.txt
 grep -q '^DETECTOR summary confirmed=0' /tmp/detector-userland.txt &&
     ok "detect.sh claims nothing confirmed" ||
     bad "detect.sh printed a confirmed line"
+
+# The entry point is what the marker actually runs. It builds the three
+# checkers, folds their --score output and detect.sh's summary, and has to
+# come back 0 on a host with nothing on it.
+note "phase 1c: ./detect on a clean host"
+if ( cd "$HERE" && ./detect ); then
+	ok "./detect exited 0"
+else
+	bad "./detect exited non-zero on a clean host"
+fi
 
 if [ "${DETECTOR_INSTALL_ROOTKIT:-0}" != "1" ]; then
 	note "phase 2/3: skipped (set DETECTOR_INSTALL_ROOTKIT=1 to run them)"

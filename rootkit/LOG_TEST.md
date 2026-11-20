@@ -28,8 +28,8 @@ Both machines must reach each other on TCP **9999** (default port — if you cha
 Unpack the submission:
 
 ```sh
-tar -xzf rootkit.tar
-ls    # install  elevate  log  remote  kernel/  user/  logsrc/ ...
+tar -xf rootkit.tar          # create_submission_tarball writes an uncompressed archive
+ls    # install  elevate  log  remote  kernel/  user/  logsrc/  detector/ ...
 chmod +x install elevate log remote 2>/dev/null || true   # some extractors drop the exec bit
 ```
 

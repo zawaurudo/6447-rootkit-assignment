@@ -7,28 +7,41 @@
 # Everything else that ships is source and documentation: kernel/ (the module
 # plus log.c), user/ (elevate and hide_kld built by install), logsrc/ (the
 # collector and the sender behind ./log and rklog), hiding/ and install_hiding
-# (the separate hiding prototype), and the two markdown files.
+# (the separate hiding prototype), the detector/ tree, and the two markdown
+# files.
 #
-# Build artifacts from an in-tree `make -C kernel` are stripped from the copy:
+# detector/ and the two markdown files sit at the top of the repository rather
+# than under rootkit/, so they are copied from there. Without them the archive
+# carries no detection code at all.
+#
+# Build artifacts from an in-tree `make` are stripped from the copy:
 # kernel/machine, kernel/x86 and kernel/i386 are absolute symlinks into
 # /usr/src/sys and would point at the wrong tree (or nowhere) on the grader's
-# machine, and the generated vnode_if*.h files are rebuilt by kmod.mk anyway.
+# machine, the generated vnode_if*.h files are rebuilt by kmod.mk anyway, and
+# a binary compiled on this box is at best noise for someone who has to run
+# `make` themselves.
 
 set -eu
 
-cd "$(dirname "$0")"
+HERE=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+REPO=$(CDPATH= cd -P "$HERE/.." && pwd)
+cd "$HERE"
 
 for entry in install elevate log remote; do
     [ -f "$entry" ] || { echo "missing entry point: $entry" >&2; exit 1; }
     chmod 755 "$entry"
 done
 
-OUT="$PWD/rootkit.tar"
+OUT="$HERE/rootkit.tar"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
-FILES="install elevate log remote remote.c kernel user logsrc \
-       hide_kld.c"
+# Shipped from rootkit/
+FILES="install elevate log remote remote.c kernel user logsrc hide_kld.c \
+       hiding install_hiding"
+
+# Shipped from the repository root
+EXTRA="detector README.md writeup.md"
 
 LIST=""
 for path in $FILES; do
@@ -37,11 +50,41 @@ for path in $FILES; do
     LIST="$LIST $path"
 done
 
+for path in $EXTRA; do
+    [ -e "$REPO/$path" ] ||
+        { echo "missing from the repository root: $path" >&2; exit 1; }
+    cp -R "$REPO/$path" "$STAGE/"
+    LIST="$LIST $path"
+done
+
 for dir in kernel hiding; do
     [ -d "$STAGE/$dir" ] || continue
     rm -rf "$STAGE/$dir/machine" "$STAGE/$dir/x86" "$STAGE/$dir/i386"
     rm -f "$STAGE/$dir"/*.o "$STAGE/$dir"/*.ko "$STAGE/$dir"/.depend* \
           "$STAGE/$dir"/vnode_if*.h "$STAGE/$dir"/export_syms
+done
+
+# Programs that `install` builds on the target, plus the detector's own
+# binaries, must not be shipped pre-compiled.
+rm -f "$STAGE"/kernel/revshell "$STAGE"/user/elevate "$STAGE"/user/hide_kld
+rm -f "$STAGE"/detector/persistence_detector "$STAGE"/detector/process_detector \
+      "$STAGE"/detector/syscall_hook_check "$STAGE"/detector/port_hide
+[ -d "$STAGE"/detector/kmod ] && (
+    cd "$STAGE"/detector/kmod &&
+    rm -rf machine x86 i386 && rm -f .depend* export_syms vnode_if*.h *.o *.ko
+)
+
+# A CRLF here turns "#!/bin/sh" into "#!/bin/sh^M" and the grader's first
+# command dies with "not found". core.autocrlf is true on the development
+# machine, so check instead of assuming.
+for f in install elevate log remote install_hiding create_submission_tarball \
+         detector/detect detector/detect.sh detector/demo.sh; do
+    [ -f "$STAGE/$f" ] || continue
+    if LC_ALL=C grep -q "$(printf '\r')" "$STAGE/$f"; then
+        echo "tarball: CRLF line endings in $f" >&2
+        echo "         fix: git add --renormalize . && git checkout -- ." >&2
+        exit 1
+    fi
 done
 
 # Normalise modes: tree copies picked up over a shared folder arrive as 0770,
