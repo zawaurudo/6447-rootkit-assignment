@@ -10,7 +10,7 @@
 #include <sys/sysent.h>
 #include <sys/syscall.h>
 
-#define SYSCALLS_SIZE 24
+#define SYSCALLS_SIZE 26
 #define SYSCALL_DETECTION_THRESHOLD 3
 
 struct syscall_info {
@@ -132,7 +132,9 @@ check_syscalls(void) {
         {.syscall_name = "sys_connect",         .syscall_num = SYS_connect},
         {.syscall_name = "sys_recvfrom",        .syscall_num = SYS_recvfrom},
         {.syscall_name = "sys_recvmsg",         .syscall_num = SYS_recvmsg},
-        {.syscall_name = "sys_fstatat",         .syscall_num = SYS_fstatat}
+        {.syscall_name = "sys_fstatat",         .syscall_num = SYS_fstatat},
+        {.syscall_name = "sys_access",          .syscall_num = SYS_access},
+        {.syscall_name = "sys_kill",            .syscall_num = SYS_kill}
     };
     int count_sus = 0;
     for (int i = 0; i < SYSCALLS_SIZE; i++) {
