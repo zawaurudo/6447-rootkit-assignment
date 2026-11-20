@@ -37,7 +37,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
 # Shipped from rootkit/
-FILES="install elevate log remote remote.c kernel user logsrc hide_kld.c \
+FILES="install elevate log remote remote.c kernel user logsrc \
        hiding install_hiding"
 
 # Shipped from the repository root
@@ -61,7 +61,8 @@ for dir in kernel hiding; do
     [ -d "$STAGE/$dir" ] || continue
     rm -rf "$STAGE/$dir/machine" "$STAGE/$dir/x86" "$STAGE/$dir/i386"
     rm -f "$STAGE/$dir"/*.o "$STAGE/$dir"/*.ko "$STAGE/$dir"/.depend* \
-          "$STAGE/$dir"/vnode_if*.h "$STAGE/$dir"/export_syms
+          "$STAGE/$dir"/vnode_if*.h "$STAGE/$dir"/export_syms \
+          "$STAGE/$dir"/opt_global.h
 done
 
 # Programs that `install` builds on the target, plus the detector's own
@@ -71,7 +72,8 @@ rm -f "$STAGE"/detector/persistence_detector "$STAGE"/detector/process_detector 
       "$STAGE"/detector/syscall_hook_check "$STAGE"/detector/port_hide
 [ -d "$STAGE"/detector/kmod ] && (
     cd "$STAGE"/detector/kmod &&
-    rm -rf machine x86 i386 && rm -f .depend* export_syms vnode_if*.h *.o *.ko
+    rm -rf machine x86 i386 &&
+    rm -f .depend* export_syms vnode_if*.h opt_global.h *.o *.ko
 )
 
 # A CRLF here turns "#!/bin/sh" into "#!/bin/sh^M" and the grader's first

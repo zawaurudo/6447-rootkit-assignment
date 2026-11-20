@@ -9,11 +9,13 @@ rootkit/kernel/*.ko
 rootkit/kernel/.depend*
 rootkit/kernel/vnode_if*.h
 rootkit/kernel/export_syms
+rootkit/kernel/opt_global.h
 rootkit/kernel/machine
 rootkit/kernel/x86
 rootkit/kernel/i386
 rootkit/hiding/*.o
 rootkit/hiding/*.ko
+rootkit/hiding/opt_global.h
 rootkit/hiding/machine
 rootkit/hiding/x86
 rootkit/hiding/i386
@@ -23,6 +25,7 @@ detector/kmod/*.ko
 detector/kmod/.depend*
 detector/kmod/export_syms
 detector/kmod/vnode_if*.h
+detector/kmod/opt_global.h
 detector/kmod/machine
 detector/kmod/x86
 detector/kmod/i386
@@ -35,6 +38,5 @@ detector/persistence_detector
 detector/process_detector
 detector/syscall_hook_check
 detector/port_hide
-detector/syscall_check/syscall_check
 exfil.log
 remote_bin

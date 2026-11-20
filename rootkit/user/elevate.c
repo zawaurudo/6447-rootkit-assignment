@@ -28,7 +28,7 @@ int main(void) {
     close(fd);
 
     execl("/bin/sh", "sh", NULL);
-    perror("oopsies lmao");
+    perror("execl /bin/sh");
 
 	return 0;
 }

@@ -1,40 +1,29 @@
 #include <sys/param.h>
+#include <sys/types.h>
 #include <sys/errno.h>
 #include <sys/kernel.h>
 #include <sys/module.h>
 #include <sys/systm.h>
+#include <sys/libkern.h>
 #include <sys/proc.h>
 #include <sys/kthread.h>
-#include <sys/socket.h>
-#include <sys/malloc.h>
-#include <sys/socketvar.h>
-#include <sys/uio.h>
-#include <sys/ucred.h>
-#include <sys/lock.h>
-#include <sys/mutex.h>
-#include <sys/user.h>
 #include <sys/condvar.h>
-#include <netinet/in.h>
-
-#include <bsm/audit_kevents.h>
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/kernel.h>
+#include <sys/user.h>
 #include <sys/malloc.h>
-#include <sys/module.h>
-#include <sys/priv.h>
-#include <sys/proc.h>
-#include <sys/socket.h>
-#include <sys/sysent.h>
-#include <sys/sysproto.h>
-#include <sys/systm.h>
-#include <sys/dirent.h>
-#include <sys/syscall.h>
-#include <sys/fcntl.h>
-
+#include <sys/queue.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <sys/sx.h>
+#include <sys/priv.h>
+#include <sys/socket.h>
+#include <sys/socketvar.h>
+#include <sys/uio.h>
+#include <sys/ucred.h>
+#include <sys/sysent.h>
+#include <sys/sysproto.h>
+#include <sys/syscall.h>
+#include <sys/dirent.h>
+#include <sys/fcntl.h>
 #include <sys/linker.h>
 
 #include <net/if.h>
@@ -43,21 +32,9 @@
 #include <netinet/in_pcb.h>
 #include <netinet/ip_var.h>
 #include <netinet/tcp_var.h>
+#include <netinet/udp.h>
 
-#include <netinet/udp.h> 
 #include <bsm/audit_kevents.h>
-#include <sys/queue.h>
-#include <sys/param.h>
-#include <sys/proc.h>
-#include <sys/module.h>
-#include <sys/sysent.h>
-#include <sys/kernel.h>
-#include <sys/systm.h>
-#include <sys/queue.h>
-#include <sys/lock.h>
-#include <sys/sx.h>
-#include <sys/mutex.h>
-#include <sys/libkern.h>
 
 #include "interface.h"
 #include "log.h"

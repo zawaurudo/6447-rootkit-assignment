@@ -1,2 +1,18 @@
 #!/bin/sh
-cc syscall_hook_check.c -o syscall_check -lkvm && ./syscall_check
+#
+# detector/syscall_check/syscall_hook_check -- convenience wrapper.
+#
+# The source lives one level up (detector/syscall_hook_check.c), which the
+# top-level Makefile also builds.  Keep the output name identical to the
+# Makefile's, or the two paths leave two differently named binaries behind:
+# this script used to emit "syscall_check" while `make` emitted
+# "syscall_hook_check", and .gitignore only knew about the first.
+
+set -eu
+
+HERE=$(CDPATH= cd -P "$(dirname "$0")" && pwd)
+SRC="$HERE/../syscall_hook_check.c"
+OUT="$HERE/../syscall_hook_check"
+
+"${CC:-cc}" "$SRC" -o "$OUT" -lkvm
+exec "$OUT" "$@"
