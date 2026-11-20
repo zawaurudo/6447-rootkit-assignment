@@ -18,7 +18,9 @@ revshell --WAIT_REMOTE, ELEVATE ioctls--> root --TCP callback :4444--> Remote
 | Device | `/dev/rootkit`, created on module load, root:wheel, mode `0666` |
 | User helpers | `/usr/local/bin/elevate`, `/usr/local/bin/revshell` |
 | Concealment startup | compiled `user/hide_kld`, absolute-path entry in `/etc/rc.local` |
-| Other install details | `/etc/rootkit_remote_ip` is written but unused by current runtime, `revshell` is launched by `install`, not configured to restart at boot |
+| Other install details | `revshell` is launched by `install`, not configured to restart at boot; a second `./install` prints that the module is already loaded and exits 0 |
+
+Removal is the reverse and has its own trap. While the module is loaded, `modfind`, `fstatat`, `getdirentries`, `open` and `access` all cooperate to make the module and any path containing the name disappear, so a script that stats or deletes anything before unloading concludes nothing was installed. `./uninstall` therefore turns hiding off through `sys/kld_hiding` (empty module name), unloads, and only then deletes `/boot/modules/rootkit.ko`, the three helpers, the `kld_list` entry and the `/etc/rc.local` lines.
 
 ## Privilege escalation and remote
 
@@ -37,7 +39,7 @@ Hiding does not depend on any symbol the kernel keeps `static`. The first versio
 
 ## Logging/key capture
 
-Keyboard input reaches `read()` on descriptor 0 in both cases the assignment names: a shell on the physical console reads the tty through stdin, and sshd hands the SSH protocol stream to the login shell through a pty, which that shell also reads through stdin. Programs that read stdin through libc (`cat`, `su`, an editor's prompt) are captured by the same path.
+Keyboard input reaches `read()` on a terminal in both cases the assignment names: a shell on the physical console reads a tty, and sshd gives the login shell a pty, which that shell reads the same way. Programs that read through libc (`cat`, `su`, an editor's prompt) are captured by the same path. What matters is the *type of the file*, not the descriptor number: sshd may hand the pty to the child on any free descriptor, and a pseudo-terminal is not even a vnode file.
 
 ```text
 tty / pty --read(0)--> kernel/log.c hook --line assembly--> 64 KB ring
@@ -53,22 +55,26 @@ Capture is in the kernel because the terminal read can only be observed there, b
 
 | Part | Implementation |
 |---|---|
-| `kernel/log.c` | `sysent[SYS_read]` is patched with `rk_read_hook`, which calls the genuine `read()` first and copies in only the bytes it actually returned. The descriptor is resolved with `fget_read()` and the vnode must be a terminal (`VV_ISTTY`, or a character device). The descriptor *number* is not the test: a trace of a login over ssh shows the shell reading its pty as fd 5, so an earlier fd-0-only test captured nothing. The one character device that must not be captured is our own: `rootkit_is_our_vnode()` compares `vp->v_rdev` against the cdev returned by `make_dev_p()`, which stops the sender's drain of `/dev/rootkit` from feeding the ring its own output. Reads that begin with `!` are dropped as well -- `devd` keeps `/dev/console` open and pours syslog lines through it. |
+| `kernel/log.c` | `sysent[SYS_read]` is patched with `rk_read_hook`, which calls the genuine `read()` first and copies in only the bytes it actually returned. The descriptor is resolved with `fget_read()` and the file must be a terminal in either of its two shapes: `DTYPE_PTS` for a pty -- `finit()` in `tty_pts.c` hands those out as their own type, so a `DTYPE_VNODE` test alone matches `/dev/console` and nothing else -- or a vnode with `VV_ISTTY`/`VCHR`. The descriptor *number* is not the test: sshd and `su(1)` give the pty to the child on whatever descriptor is free. The one character device that must not be captured is our own: `rootkit_is_our_vnode()` compares `vp->v_rdev` against the cdev returned by `make_dev_p()`, which stops the sender's drain of `/dev/rootkit` from feeding the ring its own output. Reads that begin with `!` are dropped as well, and so are the daemons that read the console for their own reasons (`devd`, `syslogd`): one of them alone produced megabytes of its own traffic and buried every keystroke. |
 | Line assembly | Bytes are assembled into lines before entering the ring, so one entry means one command instead of one entry per `read()`. `\r` (what a pty sends for Enter) and `\n` both end a line, the `\n` of a CRLF pair is swallowed, and a pending partial line is flushed when pid or uid changes and on unload. Each entry carries a single `[t=seconds.micro pid= uid=] ` header. |
 | Ring | 64 KB, drops the oldest bytes when full, so a burst never leaves a torn line at the front. There is no `sysctl` control plane: a tree named `kern.rootkit` is the first thing a detector greps for, and the previous version advertised `bytes`, `entries`, `dropped` and a `fd0_debug` classifier under that name. The ring is read through `/dev/rootkit` and nowhere else. |
 | Device | `/dev/rootkit` gained `d_read`/`d_poll`; an empty ring returns a short read instead of blocking, and `poll()` wakes through `selrecord`/`selwakeup`. `rk_log_uninit()` drains the selinfo before restoring both syscalls, so an unload cannot leave a wait channel pointing at freed memory. |
 | `logsrc/sender.c` | Installed as `/usr/local/bin/rklog` by `install`, started with the collector address from `$1` and re-added to `/etc/rc.local` with `-d` so it survives logout and reboot. It queues 4 MB in memory, appends to `/var/log/.rklog.spool` (8 MB, oldest dropped) while the collector is unreachable, replays the spool ahead of newly captured bytes after reconnecting, and truncates it only once every byte was handed to the socket. Reconnects back off from 500 ms to 30 s and re-resolve the host, so an IP or a hostname both work. |
 | `log` (root wrapper) and `logsrc/collector.c` | `./log <TARGET_IP> [PORT] [LOGFILE] [-f]` compiles the collector with the first C compiler it finds and `exec`s it, because the archive is unpacked fresh on the remote host. The collector listens on `0.0.0.0:9999` (the port must match the sender), appends to `exfil.log`, rotates it to `.1` at 8 MB, echoes to stdout, and fsyncs on disconnect. It accepts any peer and only prints a note when the source address differs from `<TARGET_IP>`; `-f` turns that into a refusal. Strict matching is not the default because the two machines are not on the same network and NAT (QEMU's slirp included) rewrites the peer address, which would silently discard the exfiltrated data. |
 
-Verified on FreeBSD 14.5: the module builds under `-Werror`, `install <collector>` returns 0 and starts `rklog`, `/dev/rootkit` is openable while `/dev` does not list it, and a reboot brings both the module (`kld_list`) and the daemon (`/etc/rc.local`) back. Terminal reads reach the collector: `devd`'s console traffic appears in the received file byte for byte, which exercises the whole path from `read()` hook through the ring, `/dev/rootkit` and the TCP sender.
+Verified on FreeBSD 14.5: the module builds under `-Werror`, `install <collector>` returns 0 and starts `rklog`, `/dev/rootkit` is openable while `/dev` does not list it, and a reboot brings both the module (`kld_list`) and the daemon (`/etc/rc.local`) back. Keystrokes reach the collector end to end: a command typed into a pty handed out by `script(1)` lands in the received file as `echo SECRET42`, and a command typed into a real `ssh -tt` session to the same box lands as `echo SECRET99` -- 11,055 bytes of captured input, delivered from `read()` through the ring, `/dev/rootkit`, `rklog` and TCP.
 
-There is no quick way to iterate on the module once it is loaded. The listener thread is stopped on unload and the unload path waits for it, so a clean `kldunload` no longer panics the box the way it used to; but while hiding is active `kldunload` cannot find the module either, because it looks it up with the same `modfind` that answers `ENOENT`. Rebuild, copy to `/boot/modules/rootkit.ko` and reboot.
+A fresh install leaves no trace of the name: `kldstat` and `kldstat -m` find nothing, `sysctl -a | grep -i rootkit` and `dmesg | grep -i rootkit` both return zero matches, and `/dev` does not list the device even though `open()` on it succeeds. The unload path prints nothing either; an earlier version left `rootkit: module unloaded` in the message buffer for any detector that greps `dmesg`.
+
+There is no quick way to iterate on the module once it is loaded. Unloading it by hand needs hiding turned off first (`/usr/local/bin/hide_kld -u`, which sends the empty name to `sys/kld_hiding`), because `kldunload` looks the module up with the same `modfind` that answers `ENOENT`. `./uninstall` does exactly that, then unloads, then deletes -- in that order, since every path containing the name answers `ENOENT` while the module is loaded.
 
 ## Changes since the midpoint
 
 | Area | Change |
 |---|---|
 | Hiding | Now filtering at the syscall boundary instead of splicing kernel lists, and it covers `modfind`/`modstat` in addition to the `kld*` calls. `sys/kld_hiding` and `sys/port_hiding` are both registered by `rootkit.ko`. The standalone `hiding/` prototype is gone: it registered the same module names (`module_register` returns `EEXIST`, 17) and patched the same `sysent` slot, so loading it after the main module would have silently reverted the directory filter. |
+| Key capture | A pty is `DTYPE_PTS`, not `DTYPE_VNODE`, so the first version captured the console and nothing else -- no sshd, no `su`, no `script`. Both types count now, the console daemons (`devd`, `syslogd`) are skipped by name, and the `kern.rootkit.*` sysctl tree is gone because a detector greps for exactly that word. |
+| Removal | `./uninstall` is new: unhide, unload, then delete, because every check that runs earlier sees a machine with no rootkit installed. |
 | Detection | New: `detector/`, a kernel module plus a userland script, described below. Nothing under `rootkit/` was changed to accommodate it. |
 
 ## Detection design
@@ -155,5 +161,6 @@ Kernel:         getdirentries/fstatat/open filtering, kld*/modfind/modstat
 Runtime/network: revshell -> interactive shell, UID/GID change to 0,
                  UDP trigger and TCP callback on 4444
 Log:            rklog -> TCP 9999 -> ./log on $REMOTE -> exfil.log,
-                captured from terminal descriptors, one line per command
+                captured from terminal files (tty and pty), one line per command
+Removal:        ./uninstall -- unhide, unload, then delete
 ```
