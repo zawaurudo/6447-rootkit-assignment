@@ -13,7 +13,10 @@ BIN_DIR=${DETECTOR_BIN_DIR:-$SCRIPT_DIR}
 
 if [ "${DETECTOR_SKIP_BUILD:-0}" != "1" ]; then
     cd "$SCRIPT_DIR" || exit 2
-    make -s persistence_detector process_detector syscall_hook_check || exit 2
+    # bmake still prints "`x' is up to date." under -s, and that noise lands
+    # between the findings this script exists to print.
+    make -s persistence_detector process_detector syscall_hook_check >/dev/null ||
+        exit 2
 fi
 
 run_detector()
@@ -43,6 +46,9 @@ run_detector()
             exit 2
             ;;
     esac
+
+    [ "${DETECTOR_QUIET:-0}" = "1" ] ||
+        echo "detect: $label score=$score"
 
     detect_point=$((detect_point + score))
 }
@@ -83,6 +89,10 @@ run_script_detector()
     esac
 
     [ "$confirmed" -gt 0 ] && detector_positive=1
+
+    [ "${DETECTOR_QUIET:-0}" = "1" ] ||
+        echo "detect: $label confirmed=$confirmed suspect=$suspect"
+
     detect_point=$((detect_point + confirmed * DETECT_CONFIRMED_WEIGHT +
         suspect * DETECT_SUSPECT_WEIGHT))
 }
@@ -92,9 +102,14 @@ if [ "$(uname -s)" = "FreeBSD" ] && command -v kldstat >/dev/null 2>&1 &&
     run_script_detector kernel-modules "$SCRIPT_DIR/detect.sh"
 fi
 
+[ "${DETECTOR_QUIET:-0}" = "1" ] ||
+    echo "detect: total score=$detect_point threshold=$DETECT_THRESHOLD"
+
 if [ "$detector_positive" -eq 1 ] ||
     [ "$detect_point" -ge "$DETECT_THRESHOLD" ]; then
+    [ "${DETECTOR_QUIET:-0}" = "1" ] || echo "detect: verdict=rootkit-suspected"
     exit 1
 fi
 
+[ "${DETECTOR_QUIET:-0}" = "1" ] || echo "detect: verdict=clean"
 exit 0

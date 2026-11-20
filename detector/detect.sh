@@ -49,8 +49,8 @@ say() {
 kld_list_names() {
 	for _f in /etc/rc.conf /etc/rc.conf.local /boot/loader.conf; do
 		[ -r "$_f" ] || continue
-		sed -n 's/^[[:space:]]*kld_list[^=]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$_f"
-		sed -n "s/^[[:space:]]*kld_list[^=]*=[[:space:]]*'\([^']*\)'.*/\1/p" "$_f"
+		sed -n 's/^[[:space:]]*kld_list[^=]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$_f" 2>/dev/null
+		sed -n "s/^[[:space:]]*kld_list[^=]*=[[:space:]]*'\([^']*\)'.*/\1/p" "$_f" 2>/dev/null
 	done | tr ' \t' '\n\n' | sed '/^$/d'
 }
 
