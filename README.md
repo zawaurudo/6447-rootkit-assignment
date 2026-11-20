@@ -35,7 +35,7 @@
 
 5. Hiding process
 - Processes are tracked in a doubly-linked list called `allproc` managed in `proc.h`. The commands that are used to fetch information about processes show the information based on that list of proccesses.
-- The entries of the list are of the type `struct proc` to store the details around a process such as pid, p_flag, p_state, etc. 
+- The entries of the list are of the type `struct proc` to store the details around a process such as pid, p_flag, p_state, etc.
 - So to hide the process, firstly, it needs to be removed from the list of processes. The unique key of a process is the pid, so just need to have a loop to go through entries in that list and remove the process that matches the pid.
 - For efficiency purpose, the processes are also stored on a hash table named `pidhashbtl`. Even though the process was removed in the main list of processes, when querying information, the hash table is still in use. Therefore, the process also needs to be removed in the hash table of processes.
 # CHANGES MADE (JUST TO LET EVERYONE KNOW):
@@ -90,7 +90,7 @@
 
 # Syscall hook detection
 * The check is performed on a selected set of system calls.
-* On each system call, the name and the number of it are taken into account. 
+* On each system call, the name and the number of it are taken into account.
 * An array of `struct nlist` is initialised with the first element's `n_name` set to "sysent" to fetch the address of sysent (system call table); and the second element's `n_name` set to the name of the syscall function that needs checking.
 * To start reading the kernel memory, we need to initialise the kd (of type `kvm_t *`) to the file pointer returned by `kvm_openfiles`.
 * `kvm_nlist` is then called with `kd` and `nl` to fetch the data relating to the names set in the `struct nlist` array.
@@ -115,3 +115,20 @@
 
 - ./log 127.0.0.1 9999 /tmp/x.log
 --on REMOTE: prints "collector: port 9999, any peer, appending to /tmp/x.log"
+
+
+# PERSISTENCE CONCEALMENT AND DETECTION
+- Changes made:
+    - order of installation, because once the rootkit is loaded, the config files are hidden which means that persistence can't be ensured -> move loading to the very end after all config and setup and installation/compilation is completed
+
+- Concealment:
+    - Added more concealment to hide persistence artifacts by hooking various syscalls
+    - Hooked fstatat, openat and open syscalls, as well as access since the detector for persistence artifacts uses those to directly read config and module files
+    - blocked certain files (including rc.local and rootkit.ko) from being able to be opened by any calls
+
+- Detector:
+    - Works by first checking known sus paths
+    - Scans through startup config files and startup script directories, suspicious commands and boot modules
+    - Ignores comments to avoid false positives 
+    - Assigns risk points to each discovery, and if total amount of points crosses a threshold of 10, then the detector reports rootkit is found
+    - Certain discoveries are very indicative of rootkit existence, so automatically assign them the number of points to reach risk threshold
