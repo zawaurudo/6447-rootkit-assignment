@@ -41,7 +41,7 @@ module_loaded() {
 if module_loaded; then
     printf 'rootkit.ko is already loaded.\n'
     printf 'It hides its own sources, so this script cannot rebuild them; reboot to start\n'
-    printf 'from a clean kernel, or run ./install_hiding for the standalone prototype.\n'
+    printf 'from a clean kernel.\n'
     exit 0
 fi
 

