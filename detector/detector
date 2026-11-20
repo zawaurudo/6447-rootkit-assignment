@@ -1,0 +1,15 @@
+#!/bin/sh
+DETECT_THRESHOLD=1
+detect_point=0
+# Add more files here
+[ -f "syscall_hook_check.c" ]
+
+cc -Wall -Wextra -lkvm -o syscall_hook_check syscall_hook_check.c
+[ -f "syscall_hook_check" ]
+[ -x "syscall_hook_check" ]
+./syscall_hook_check 1> /dev/null
+
+[ "$?" -eq 1 ] && detect_point=$((detect_point + 1))
+
+[ "$detect_point" -ge $DETECT_THRESHOLD ] && exit 1
+exit 0
