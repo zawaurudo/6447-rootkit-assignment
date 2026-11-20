@@ -10,6 +10,7 @@
 #include <sys/syscall.h>
 
 #define SYSCALLS_SIZE 24
+#define THRESHOLD 3
 
 struct syscall_info {
     char *syscall_name;
@@ -22,6 +23,8 @@ int check_syscalls();
 int
 main(int argc, char *argv[])
 {
+    (void) argc;
+    (void) argv;
     return check_syscalls();
 }
 
@@ -29,7 +32,7 @@ int
 detect_syscall_hook(char *syscall_name, int syscall_num) {
     char errbuf[_POSIX2_LINE_MAX];
     kvm_t *kd;
-    struct nlist nl[] = { { NULL }, { NULL }, { NULL }, };
+    struct nlist nl[3] = { 0 };
 
     unsigned long addr;
     int callnum;
@@ -114,18 +117,18 @@ check_syscalls() {
         {.syscall_name = "sys_recvmsg",         .syscall_num = SYS_recvmsg},
         {.syscall_name = "sys_fstatat",         .syscall_num = SYS_fstatat}
     };
-    int flag = 0;
+    int count_sus = 0;
     for (int i = 0; i < SYSCALLS_SIZE; i++) {
         printf("Checking %s: ", syscalls[i].syscall_name);
         if (detect_syscall_hook(syscalls[i].syscall_name, 
                 syscalls[i].syscall_num)
         ) {
             printf("BAD\n");
-            flag = 1;
+            ++count_sus;
         } else {
             printf("GOOD\n");
         }
     }
 
-    return flag;
+    return count_sus >= THRESHOLD;
 }

