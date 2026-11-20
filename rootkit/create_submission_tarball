@@ -40,8 +40,13 @@ trap 'rm -rf "$STAGE"' EXIT
 FILES="install elevate log remote remote.c kernel user logsrc \
        hiding install_hiding"
 
-# Shipped from the repository root
-EXTRA="detector README.md writeup.md"
+# Nothing is copied from the repository root.  The submission is
+# `give cs6447 rootkit writeup.md rootkit.tar detection.tar`: the detector tree
+# ships as detection.tar (create_detection_tarball), and writeup.md is handed
+# in on its own.  An earlier version copied detector/ and both markdown files
+# in here, which is neither required nor harmless -- the archive is supposed to
+# contain the rootkit.
+EXTRA=""
 
 LIST=""
 for path in $FILES; do
@@ -65,16 +70,8 @@ for dir in kernel hiding; do
           "$STAGE/$dir"/opt_global.h
 done
 
-# Programs that `install` builds on the target, plus the detector's own
-# binaries, must not be shipped pre-compiled.
+# Programs that `install` builds on the target must not be shipped pre-compiled.
 rm -f "$STAGE"/kernel/revshell "$STAGE"/user/elevate "$STAGE"/user/hide_kld
-rm -f "$STAGE"/detector/persistence_detector "$STAGE"/detector/process_detector \
-      "$STAGE"/detector/syscall_hook_check "$STAGE"/detector/port_hide
-[ -d "$STAGE"/detector/kmod ] && (
-    cd "$STAGE"/detector/kmod &&
-    rm -rf machine x86 i386 &&
-    rm -f .depend* export_syms vnode_if*.h opt_global.h *.o *.ko
-)
 
 # A CRLF here turns "#!/bin/sh" into "#!/bin/sh^M" and the grader's first
 # command dies with "not found". core.autocrlf is true on the development
