@@ -1,170 +1,169 @@
-# FreeBSD Rootkit - Final Design
+# FreeBSD 14.5 Rootkit & Detector
 
-## Architecture
+## 1. System architecture
 
-```text
-Installer --build/load--> rootkit.ko --creates--> /dev/rootkit
-Remote --UDP magic :4444--> kernel listener --wake/source IP--> revshell
-revshell --WAIT_REMOTE, ELEVATE ioctls--> root --TCP callback :4444--> Remote
+```mermaid
+flowchart LR
+  subgraph Target
+    I["install"] -->|"build and copy"| M["rootkit.ko"]
+    M -->|"MOD_LOAD creates"| D["/dev/rootkit"]
+    E["elevate"] -->|"open and ELEVATE ioctl"| D
+    R["revshell"] -->|"WAIT_REMOTE and ELEVATE ioctls"| D
+    D -->|"captured keystrokes"| L["rklog"]
+    R --> S["/bin/sh -i (root)"]
+  end
+  subgraph Remote
+    X["remote (./remote)"]
+    C["collector"]
+    C1["exfil.log"]
+    C --> C1
+  end
+  X -->|"UDP trigger, port 4444"| M
+  S -->|"TCP callback, port 4444"| X
+  L -->|"TCP port 9999"| C
 ```
 
-## Install and persistence
+## 2. Installation and persistence
 
-`install` checks source paths and required commands, builds `rootkit.ko` with FreeBSD's kernel-module build system, and compiles `elevate`, `revshell`, `remote`, and `user/hide_kld`. It copies the module to `/boot/modules/rootkit.ko`, adds `rootkit` to `kld_list` with `sysrc`, and loads it if needed. It installs `elevate` and `revshell` under `/usr/local/bin`, starts `revshell` for the current boot, and runs the absolute `hide_kld` path, that path is also added to `/etc/rc.local` for subsequent boots. The absolute path avoids dependence on the boot-time working directory or project-directory name. It does not preserve the helper if its containing directory is moved or removed, the helper must remain at the recorded path.
-
-| Observable | Expected artifact |
-|---|---|
-| Module persistence | `/boot/modules/rootkit.ko`, `rootkit` in `/etc/rc.conf` `kld_list`, module load recreates `/dev/rootkit` |
-| Device | `/dev/rootkit`, created on module load, root:wheel, mode `0666` |
-| User helpers | `/usr/local/bin/elevate`, `/usr/local/bin/revshell` |
-| Concealment startup | compiled `user/hide_kld`, absolute-path entry in `/etc/rc.local` |
-| Other install details | `revshell` is launched by `install`, not configured to restart at boot; a second `./install` prints that the module is already loaded and exits 0 |
-
-Removal is the reverse and has its own trap. While the module is loaded, `modfind`, `fstatat`, `getdirentries`, `open` and `access` all cooperate to make the module and any path containing the name disappear, so a script that stats or deletes anything before unloading concludes nothing was installed. `./uninstall` therefore turns hiding off through `sys/kld_hiding` (empty module name), unloads, and only then deletes `/boot/modules/rootkit.ko`, the three helpers, the `kld_list` entry and the `/etc/rc.local` lines.
-
-## Privilege escalation and remote
-
-`elevate` opens `/dev/rootkit` and issues the elevation ioctl handled by `kernel/interface.c`, on success it execs a root shell. Separately, `revshell` opens the device and issues `rootkit_WAIT_REMOTE`, which blocks until the in-kernel UDP listener matches `BSD_rootkit_REMOTE_MAGIC_TRIGGER_v1` and returns the sender's IP. It then issues `rootkit_ELEVATE`, which creates a credential with user IDs 0 and group `wheel`, installs it on the calling process under its process lock, and returns to userland. `revshell` connects to the sender on TCP `4444`, redirects standard input/output/error to that socket, and execs interactive `/bin/sh`.
-
-Two ordering details decide whether that chain ever fires on a fresh box. `revshell` opens `/dev/rootkit`, and the device only exists once `MOD_LOAD` has run, while `install` compiles and launches the daemons before it loads the module. It therefore retries the open for up to two minutes instead of exiting on the first `ENOENT`, and `install` starts it after `kldload` rather than before. The reverse direction matters as well: the daemon holds the device open, and `destroy_dev()` inside `MOD_UNLOAD` blocks until that last reference is dropped, so `uninstall` stops `revshell` and `rklog` and waits for them to actually exit before it unloads. Skipping that wait wedges the unload with the linker lock held, and every later `kldstat` and `kldunload` on the machine hangs behind it.
-
-## Concealment
-
-| Name | Mechanism |
-|---|---|
-| **Directory listing filter** | Replaces `SYS_getdirentries`, calls the original handler, copies its returned bytes from the user buffer into a kernel buffer, and walks variable-length `dirent` records using `d_reclen`. It removes matching entries by shifting subsequent bytes with `memmove`, then copies the modified records back and reduces the returned byte count. |
-| **Module-list hiding** | Filtering at the syscall boundary, not surgery on kernel lists. `kldnext`, `kldfind`, `kldstat`, `modfind` and `modstat` are replaced; any answer naming this module comes back `ENOENT`. The last two are the ones that matter: `kldstat -m` does not call `kldfind`, it calls `modfind` and then `modstat`, which is why an earlier version hid the module from `kldstat` while `kldstat -m rootkit` still printed it. A trace of the two paths is in the concealment notes below. |
-| **TCP PCB-list hiding** | Registered as `sys/port_hiding`. It walks `V_tcbinfo.ipi_listhead` under the PCB info lock, unlinks entries whose local or foreign port matches, and subtracts what it removed from `ipi_count`, because the counter and the list are otherwise left inconsistent -- which is exactly the discrepancy the detector's second check looks for. |
-All three alter an enumeration view rather than the object being enumerated: the file is still on disk, the module is still in the kernel, the socket is still established. Every replaced syscall entry is saved first and restored by `rk_remove_hooks()`, and the log's `selinfo` is drained before the rest of the module is torn down, so an unload cannot leave a hook pointing into freed text.
-
-Hiding does not depend on any symbol the kernel keeps `static`. The first version spliced the module out of `modules` and `linker_files` directly, which needed `kld_sx`, `linker_files` and `modules`, all file-static in 14.5. That only linked because this kernel resolves locals through `link_elf_leak_locals`; the replacement finds its own id with `linker_file_foreach()` -- a public API -- and answers syscalls instead of editing the list.
-
-## Logging/key capture
-
-Keyboard input reaches `read()` on a terminal in both cases the assignment names: a shell on the physical console reads a tty, and sshd gives the login shell a pty, which that shell reads the same way. Programs that read through libc (`cat`, `su`, an editor's prompt) are captured by the same path. What matters is the *type of the file*, not the descriptor number: sshd may hand the pty to the child on any free descriptor, and a pseudo-terminal is not even a vnode file.
-
-```text
-tty / pty --read(0)--> kernel/log.c hook --line assembly--> 64 KB ring
-                                                             ^
-                                       /dev/rootkit  read()/poll()
-                                                             |
-                                       /usr/local/bin/rklog (logsrc/sender.c)
-                                                             | TCP :9999
-                                       ./log on $REMOTE --> exfil.log + stdout
+```mermaid
+flowchart TD
+  A["Build module and binaries"] --> B["Copy rootkit.ko to /boot/modules"]
+  B --> C["Add rootkit to kld_list in /etc/rc.conf"]
+  C --> D["Add rklog, hide_kld, and revshell to /etc/rc.local"]
+  D --> E["kldload and create /dev/rootkit"]
+  E --> F["Start rklog and revshell"]
+  F --> G["Enable module-name hiding with hide_kld"]
 ```
 
-Capture is in the kernel because the terminal read can only be observed there, before the caller consumes the bytes; delivery is in userland because retries, spooling and name resolution cannot panic the box from there.
+- `./install` verifies dependencies and source paths, builds `kernel/rootkit.ko`, `elevate`, `revshell`, `remote`, and `rklog`; it installs `elevate`, `revshell`, and `rklog` as `/usr/local/bin/{elevate,revshell,rklog}`, and compiles `user/hide_kld.c` to `user/hide_kld` before installing it as `/usr/local/bin/hide_kld`.
+- Persistence: `/boot/modules/rootkit.ko`, `kld_list+=rootkit` in `/etc/rc.conf`, `/usr/local/bin/rklog`, `/usr/local/bin/hide_kld`, and `/usr/local/bin/revshell &` in `/etc/rc.local`.
+- `revshell` persistence was added after the midpoint.
+- `/dev/rootkit` is recreated on `MOD_LOAD` as `root:wheel`, mode `0666`.
+- Loading is performed last, after configuration writes, to prevent hiding hooks from blocking installation.
+- `./uninstall` stops `rklog`/`revshell`, waits for `/dev/rootkit` references to leave, disables hiding, unloads the module, removes the module/binaries and `kld_list` entry, and removes `rklog`/`hide_kld` entries from `/etc/rc.local`; it does not remove the `revshell` startup line.
 
-| Part | Implementation |
-|---|---|
-| `kernel/log.c` | `sysent[SYS_read]` is patched with `rk_read_hook`, which calls the genuine `read()` first and copies in only the bytes it actually returned. The descriptor is resolved with `fget_read()` and the file must be a terminal in either of its two shapes: `DTYPE_PTS` for a pty -- `finit()` in `tty_pts.c` hands those out as their own type, so a `DTYPE_VNODE` test alone matches `/dev/console` and nothing else -- or a vnode with `VV_ISTTY`/`VCHR`. The descriptor *number* is not the test: sshd and `su(1)` give the pty to the child on whatever descriptor is free. The one character device that must not be captured is our own: `rootkit_is_our_vnode()` compares `vp->v_rdev` against the cdev returned by `make_dev_p()`, which stops the sender's drain of `/dev/rootkit` from feeding the ring its own output. Reads that begin with `!` are dropped as well, and so are the daemons that read the console for their own reasons (`devd`, `syslogd`): one of them alone produced megabytes of its own traffic and buried every keystroke. |
-| Line assembly | Bytes are assembled into lines before entering the ring, so one entry means one command instead of one entry per `read()`. `\r` (what a pty sends for Enter) and `\n` both end a line, the `\n` of a CRLF pair is swallowed, and a pending partial line is flushed when pid or uid changes and on unload. Each entry carries a single `[t=seconds.micro pid= uid=] ` header. |
-| Ring | 64 KB, drops the oldest bytes when full, so a burst never leaves a torn line at the front. There is no `sysctl` control plane: a tree named `kern.rootkit` is the first thing a detector greps for, and the previous version advertised `bytes`, `entries`, `dropped` and a `fd0_debug` classifier under that name. The ring is read through `/dev/rootkit` and nowhere else. |
-| Device | `/dev/rootkit` gained `d_read`/`d_poll`; an empty ring returns a short read instead of blocking, and `poll()` wakes through `selrecord`/`selwakeup`. `rk_log_uninit()` drains the selinfo before restoring both syscalls, so an unload cannot leave a wait channel pointing at freed memory. |
-| `logsrc/sender.c` | Installed as `/usr/local/bin/rklog` by `install`, started with the collector address from `$1` and re-added to `/etc/rc.local` with `-d` so it survives logout and reboot. It queues 4 MB in memory, appends to `/var/log/.rklog.spool` (8 MB, oldest dropped) while the collector is unreachable, replays the spool ahead of newly captured bytes after reconnecting, and truncates it only once every byte was handed to the socket. Reconnects back off from 500 ms to 30 s and re-resolve the host, so an IP or a hostname both work. |
-| `log` (root wrapper) and `logsrc/collector.c` | `./log <TARGET_IP> [PORT] [LOGFILE] [-f]` compiles the collector with the first C compiler it finds and `exec`s it, because the archive is unpacked fresh on the remote host. The collector listens on `0.0.0.0:9999` (the port must match the sender), appends to `exfil.log`, rotates it to `.1` at 8 MB, echoes to stdout, and fsyncs on disconnect. It accepts any peer and only prints a note when the source address differs from `<TARGET_IP>`; `-f` turns that into a refusal. Strict matching is not the default because the two machines are not on the same network and NAT (QEMU's slirp included) rewrites the peer address, which would silently discard the exfiltrated data. |
+## 3. Privilege escalation
 
-Verified on FreeBSD 14.5: the module builds under `-Werror`, `install <collector>` returns 0 and starts `rklog`, `/dev/rootkit` is openable while `/dev` does not list it, and a reboot brings both the module (`kld_list`) and the daemon (`/etc/rc.local`) back. Keystrokes reach the collector end to end: a command typed into a pty handed out by `script(1)` lands in the received file as `echo SECRET42`, and a command typed into a real `ssh -tt` session to the same box lands as `echo SECRET99` -- 11,055 bytes of captured input, delivered from `read()` through the ring, `/dev/rootkit`, `rklog` and TCP.
+```mermaid
+sequenceDiagram
+  participant U as User or revshell
+  participant D as rootkit device
+  participant K as Kernel
+  U->>D: open and ioctl
+  D->>K: ELEVATE and lock process
+  K->>K: Set real/effective/saved UID and GID to zero
+  K->>K: Include wheel in group list and install credentials
+  K->>K: Unlock process
+  K-->>U: 0
+  U->>U: Execute /bin/sh
+```
 
-A fresh install leaves no trace of the name: `kldstat` and `kldstat -m` find nothing, `sysctl -a | grep -i rootkit` and `dmesg | grep -i rootkit` both return zero matches, and `/dev` does not list the device even though `open()` on it succeeds. The unload path prints nothing either; an earlier version left `rootkit: module unloaded` in the message buffer for any detector that greps `dmesg`.
+- `elevate` opens `/dev/rootkit` and issues `rootkit_ELEVATE`; `revshell` uses `rootkit_IOCTL_ELEVATE`, an alias for the same ioctl. The handler acquires `PROC_LOCK`, creates/copies a credential, sets real/effective/saved UID and GID to `0` (`GID_WHEEL`), includes `wheel` in the group list, and installs it on the calling process.
+- `rootkit_WAIT_REMOTE` waits on `remote_cv` until the UDP listener records the sender address and signals the condition variable. `revshell` forks, elevates the child, calls `hide_process_syscall()`, connects TCP to the trigger host on port 4444, duplicates the socket onto descriptors 0/1/2, then calls `execve("/bin/sh", ...)`. If the trigger address is `0.0.0.0` (for example, QEMU forwarding), it uses the compiled `DEFAULT_REMOTE_IP` (default `10.0.2.2`).
+- At startup, `revshell` retries opening `/dev/rootkit` once per second for up to 120 seconds, because the binary can start before `MOD_LOAD` creates the device.
 
-The remote path was exercised with `$REMOTE` on a different machine from `$TARGET`, which is what the interface asks for: `./remote <target>` binds TCP 4444, sends one UDP datagram carrying the magic string, and the trigger crosses into the guest -- QEMU's slirp forwards the datagram in with `hostfwd=udp`, and the listener records the sender address the kernel saw. `revshell` wakes, elevates, and calls back over TCP; the commands typed into `./remote` came back from the target as `uid=0(root) gid=0(wheel) groups=0(wheel)`, `freebsd` and `14.5-RELEASE`, with `./remote` exiting 0. The same run left `kldstat` empty, `kldstat -m` at status 1, `/dev` unlisted, and `./detect` at `total score=23 threshold=10 verdict=rootkit-suspected` (persistence 10, process 1, syscall-hooks 11, module census suspect 1).
+## 4. Concealment
 
-There is no quick way to iterate on the module once it is loaded. Unloading it by hand needs hiding turned off first (`/usr/local/bin/hide_kld -u`, which sends the empty name to `sys/kld_hiding`), because `kldunload` looks the module up with the same `modfind` that answers `ENOENT`. `./uninstall` does exactly that, then unloads, then deletes -- in that order, since every path containing the name answers `ENOENT` while the module is loaded. It also stops `revshell` and `rklog` first and waits for them: `destroy_dev()` blocks while any process still holds the device, and an unload blocked there keeps the linker lock, so `kldstat` itself stops answering. Run the script by path (`/path/to/uninstall`), not by `cd`-ing into the directory, which cannot work while the module is loaded.
-
-## Changes since the midpoint
-
-| Area | Change |
-|---|---|
-| Hiding | Now filtering at the syscall boundary instead of splicing kernel lists, and it covers `modfind`/`modstat` in addition to the `kld*` calls. `sys/kld_hiding` and `sys/port_hiding` are both registered by `rootkit.ko`. The standalone `hiding/` prototype is gone: it registered the same module names (`module_register` returns `EEXIST`, 17) and patched the same `sysent` slot, so loading it after the main module would have silently reverted the directory filter. |
-| Key capture | A pty is `DTYPE_PTS`, not `DTYPE_VNODE`, so the first version captured the console and nothing else -- no sshd, no `su`, no `script`. Both types count now, the console daemons (`devd`, `syslogd`) are skipped by name, and the `kern.rootkit.*` sysctl tree is gone because a detector greps for exactly that word. |
-| Removal | `./uninstall` is new: unhide, unload, then delete, because every check that runs earlier sees a machine with no rootkit installed. |
-| Detection | New: `detector/`, a kernel module plus a userland script, described below. Nothing under `rootkit/` was changed to accommodate it. |
-
-## Detection design
-
-Detection is one tree, `detector/`, and both halves of my area are in it: `kmod/detector.c` reads what userland cannot see honestly, `detect.sh` does the `kld_list` bookkeeping and the processless-socket check, and `./detect` folds every check into a single risk score. The filesystem and persistence artefacts, the process table, and syscall integrity are the three userland checkers sitting next to them; they were separate PRs and are merged into the same directory now.
-
-### Why a kernel module
-
-Both signals worth acting on live in kernel structures. `kldstat` and `netstat` read the same lists the rootkit edits, so a userland tool built on them reports a clean host while `kld_hiding` is doing its job. Only reading the structures underneath shows the discrepancy.
-
-### Why it does not scan on load
-
-`MOD_LOAD` runs inside the linker with `kernel_map` already write-locked, and the walk wants `vm_map_lock_read()`. A scan there hangs `kldload` with no output and no recovery short of a reboot. That took three attempts to accept.
-
-So `kldload detector.ko` registers sysctls and nothing else. `sysctl kern.detector.scan=1` runs one pass from ordinary process context, where sleeping is permitted. `detect.sh` issues that call, which is why the script works on a host where the module was loaded hours ago.
-
-### The two checks
-
-| Check | Signal | Verdict |
+| Target | Intercept / structure | Detection-relevant mechanism |
 |---|---|---|
-| **Executable mappings** | Entries in `kernel_map` with `VM_PROT_EXECUTE` and at least a page long that overlap neither the kernel image nor any region claimed by a `linker_file`. The claimed regions are collected first with `linker_file_foreach()`, then the map is walked with `VM_MAP_ENTRY_FOREACH()`. | `confirmed` |
-| **TCP PCB counter** | `V_tcbinfo.ipi_count` larger than the number of entries reachable through `INP_ALL_ITERATOR()`, same answer on three samples 100 ms apart. | `confirmed` |
+| Directory listings | `SYS_getdirentries` and `SYS_freebsd11_getdirentries`; native/11.x dirent layouts | Call the original syscall; copy the returned buffer; walk `d_reclen`; remove names matching `rootkit`, `hide`, etc.; compact records and reduce the returned size. |
+| Files/configuration | `SYS_fstatat`, `SYS_open`, `SYS_openat`, `SYS_access` | `fstatat` filters paths containing hidden-name substrings such as `rootkit` or `hide`. `open`, `openat`, and `access` return `ENOENT` only for exact matches in `blocked_files` (including `/etc/rc.conf`, `/etc/rc.local`, `/boot/modules/rootkit.ko`, and selected binaries); other paths are passed through. `/dev/rootkit` is not in `blocked_files`, so clients can open it. |
+| Modules | `SYS_kldnext`, `SYS_kldfind`, `SYS_kldstat`, `SYS_modfind`, `SYS_modstat`; custom `sys/kld_hiding` | Resolve the module using `linker_file_foreach()` and filter its name/id at syscall boundaries. `hide_kld` enables filtering by name; `hide_kld -u` passes an empty name to `sys/kld_hiding`, disabling it so the module can be found and unloaded. Restore every original `sy_call` on unload. |
+| TCP ports | Manually invoked custom syscall `sys/port_hiding`; `V_tcbinfo.ipi_listhead`, `ipi_count` | An external caller resolves and invokes the registered syscall; it is not run automatically. It locks `V_tcbinfo`, removes matching local/foreign-port TCP `inpcb` entries, and decrements `ipi_count`. It does not hide the UDP `:4444` trigger socket, which is in `V_udbinfo`. |
+| Processes | Hidden-PID table; `SYS___sysctl`, `SYS_kill` | Record hidden PIDs in a mutex-protected table. Filter matching entries from `KERN_PROC` `sysctl` results and return `ESRCH` from hidden-PID `kill`. Live process structures and PID lists are not unlinked. |
 
-### Why both may say confirmed, and how that changed
+## 5. Bonus capabilities
 
-The first version let only the PCB counter convict. The reasoning was that from inside `kernel_map` a hidden module and a legitimate one are indistinguishable: `kld_hiding()` removes the entry from both `modules` and `linker_files`, so `hiding.ko` looks exactly like `zfs.ko` — executable pages that nothing in the image accounts for.
-
-That reasoning had a hole. `linker_file_foreach()` is public (`linker.h:160`); it takes `kld_sx` internally and visits every loaded file. Collecting those ranges before touching the map turns the check from "is this page inside the kernel image" into "does any loaded file claim this page". `zfs.ko` is claimed; a mapping allocated by a module and never registered is not. The census can therefore convict, with one caveat that has to be handled explicitly: the collection must happen *before* `vm_map_lock_read()`, because `kldload` takes `kld_sx` first and `kernel_map` second, so the reverse order is a lock-order reversal against a concurrent load.
-
-Two false positives showed up while getting this right, and both are now guarded:
-
-- `linker_kernel_file->address` points at the kernel's text section, 2 MB above `KERNBASE`, not at the ELF header, and `size` is smaller than the whole mapped image. Containment tests miss the head of the image; the test has to be an overlap.
-- `kernel_map` begins at `VM_MIN_KERNEL_ADDRESS`, far below `KERNBASE`. The direct map and KVA live there, are executable, and belong to no `linker_file` at all, so entries below the kernel image are skipped before they are counted.
-
-The PCB counter stays as the second, independent signal, and the reason it is worth having separately is that it does not depend on the linker at all: `in_pcballoc()` increments it and links the entry, `in_pcbfree()` decrements it and unlinks it, and `port_hiding()` calls `CK_LIST_REMOVE()` without either, so the counter sits permanently one ahead of the list.
-
-### Why the module list is still not compared directly
-
-`linker_file_foreach()` gives the ranges, but not the names to go with them, and it cannot remove anything: un-hiding a `kld_hiding`'d module means splicing a `TAILQ` whose head (`kern_linker.c:117`) is `static`. Detection only needs to observe, so that is enough — but it also means the census reports "an executable mapping that no loaded file claims", not "the module named X is hidden". The name has to come from elsewhere; the syscall check recovers it by comparing `sysent[]` against the module images.
-
-### Why the walk takes the pcb lock, and why three samples
-
-`ipi_count` and the list are updated by different threads, so a scan racing with a connect or a close can see a delta that disappears on the next pass. Reporting that would be a false positive on any busy host, so the count is compared three times, 100 ms apart, and only a delta that survives all three is reported.
-
-The walk itself goes through `INP_ALL_ITERATOR()` and `inp_next()`, which take `INPLOOKUP_RLOCKPCB` on each pcb as it is visited. It has to run to completion: `inp_next()` releases the pcb lock and the SMR reference only on the call that returns NULL, so breaking out early leaks both. The previous version walked `ipi->ipi_listhead` under `CK_LIST_FOREACH` with no lock at all -- on 14.5 that list is SMR-protected, and a scan racing with `CK_LIST_REMOVE` walks freed memory.
-
-### The userland half
-
-`detect.sh` covers what cannot be confirmed from userland, and never prints more than `suspect`. Two bookkeeping discrepancies: a module present in `/boot/modules` or named in `kld_list` that `kldstat` does not report, and a socket in `sockstat` with no owning process.
-
-Both are reconciled against kernel sources the rootkit edits independently, which is the only reason they are worth printing.
-
-### Measured
-
-FreeBSD 14.5 under QEMU, `kern.osreldate=1405000`, everything built under `-Wall -Wextra` (`-Werror` for the userland half of the detector):
-
-```text
-Module census, clean host:     entries=10 exec=4 linker_files=4 unclaimed=0
-                               module status=clean conf=high
-Module census, hooktest.ko:    confirmed=1 -- the 16 KB RWX mapping at
-                               0xffffffff83000000 is claimed by no linker_file
-./detect, clean host:          persistence 0, process 0, syscall-hooks 0,
-                               kernel-modules suspect=1, total 1, verdict=clean
-./detect, rootkit loaded:      persistence 10, syscall-hooks 11,
-                               total 21 threshold 10, verdict=rootkit-suspected
+```mermaid
+flowchart LR
+  R["SYS_read (rk_read_hook)"] --> T{"PTS or TTY/VCHR?"}
+  T -->|"no"| I["Ignore"]
+  T -->|"yes"| F{"size at most 512, not daemon or own device?"}
+  F -->|"no"| I
+  F -->|"yes"| B["64 KB ring"]
+  B --> D["/dev/rootkit"]
+  D --> K["rklog"]
+  K -->|"4 MB queue and 8 MB spool"| C["TCP port 9999 collector"]
 ```
 
-The single suspect on a clean host is a `? ? ? ? udp4 *:4444` socket. `sockstat` prints one `?` in the process column when it cannot attribute a socket, and `detect.sh` used to look for `???`, so that line never fired.
+- **Keystroke capture:** hook `SYS_read`, run the real read first, and capture successful reads from `DTYPE_PTS` or TTY/VCHR vnodes. Exclude the rootkit cdev, `devd`, `syslogd`, `init`, leading `!` data, and reads above 512 bytes. Assemble lines with PID/UID headers in a 64 KB ring. `SYS_write` is also patched and restored by `rk_log_uninit()`; its optional stdout/stderr capture is disabled by default.
+- **Delivery:** `rklog` polls `/dev/rootkit`, buffers 4 MB in RAM, spools 8 MB to `/var/log/.rklog.spool`, retries 500 ms–30 s, and sends TCP to port 9999. The collector accepts a peer, optionally enforces `-f <TARGET_IP>`, writes `exfil.log`, and rotates at 8 MB.
+- **Remote shell:** a kernel UDP listener on port 4444 accepts the exact `BSD_rootkit_REMOTE_MAGIC_TRIGGER_v1` datagram, records the sender, and wakes `revshell`, which creates the elevated TCP callback.
 
-The module census does not convict the rootkit, and that is the honest result: its text belongs to a linker_file, so it looks like any other module from `kernel_map`. What the census does convict is an executable mapping that no module claims -- demonstrated above with a two-line test module that allocates one. The rootkit is caught by the other two checks, which is the division of labour the design intends.
+## 6. Changes since midpoint
 
-Two behaviours of the census are worth recording, because both were false positives before:
+| Area | Midpoint → final |
+|---|---|
+| Modules | Replaced tentative list mutations with `kld*/mod*` syscall filtering using public `linker_file_foreach()`; added module-name and bare-name handling. |
+| Processes | Replaced direct `allproc`/PID-hash unlinking with a mutex-protected hidden-PID table and `KERN_PROC`/`kill` syscall filtering to avoid corrupting live process bookkeeping. |
+| Persistence | Moved loading after setup, hid configuration/module paths, and added post-midpoint persistent `revshell` startup. Removed the conflicting `hiding/` prototype that caused `EEXIST`. |
+| Key capture | Added `DTYPE_PTS`, excluded noise processes and own cdev, capped reads, and removed key capture sysctl exposure. |
+| Teardown | Added ordered daemon stop, hiding disable, unload, and file/persistence cleanup; removed successful-unload `dmesg` messages. |
+| Installer | Reduced install output, removed redundant OS/root checks, and fixed the `hide_kld` build. |
+| Detection | Added kernel mapping/PCB checks, KVM syscall audit, persistence/process/bookkeeping checkers, and unified scoring. |
 
-- `linker_kernel_file->address` points at the kernel's text section (2 MB above `KERNBASE`), not at the ELF header, and its `size` is smaller than the mapped region. The test has to be an overlap check, not containment.
-- `kernel_map` starts at `VM_MIN_KERNEL_ADDRESS`, which is far below `KERNBASE`; the direct map and KVA live there, are executable, and belong to no linker_file. Everything below the kernel image is skipped.
+## 7. Detector design and detected methods
 
-## Summary
-
-```text
-Files/startup:  /boot/modules/rootkit.ko, kld_list, /dev/rootkit,
-                /usr/local/bin/{elevate,revshell,rklog}, /etc/rc.local, user/hide_kld
-Kernel:         getdirentries/fstatat/open filtering, kld*/modfind/modstat
-                filtering, read() hook + ring buffer, port_hiding
-Runtime/network: revshell -> interactive shell, UID/GID change to 0,
-                 UDP trigger and TCP callback on 4444
-Log:            rklog -> TCP 9999 -> ./log on $REMOTE -> exfil.log,
-                captured from terminal files (tty and pty), one line per command
-Removal:        ./uninstall -- unhide, unload, then delete
+```mermaid
+flowchart TD
+  D["./detect"] --> K["Kernel mapping and PCB module"]
+  D --> S["KVM syscall audit"]
+  D --> P["Persistence and process checkers"]
+  D --> U["Userland module and socket checks"]
+  K -->|"confirmed"| V["Risk score"]
+  S -->|"weighted score"| V
+  P -->|"weighted score"| V
+  U -->|"suspect score"| V
+  V -->|"score at least 10"| A["rootkit suspected"]
+  V -->|"score below 10"| C["clean"]
 ```
+
+| Method | What is detected | How it is checked |
+|---|---|---|
+| Executable mapping census | Hidden or unlinked KLD text / anonymous executable kernel mappings | On `sysctl kern.detector.scan=1`, call `linker_file_foreach()` to record claimed ranges, then use `vm_map_lock_read()` and `VM_MAP_ENTRY_FOREACH()` on `kernel_map`. Check `VM_PROT_EXECUTE` entries at least `PAGE_SIZE` long from the kernel image through a bounded 64 MB window above it; report executable mappings not overlapping the kernel image or any recorded linker-file range. |
+| PCB counter audit | TCP PCB unlinking that leaves `ipi_count` stale | Compare `V_tcbinfo.ipi_count` with a full `INP_ALL_ITERATOR(..., INPLOOKUP_RLOCKPCB)` walk over 3 samples 100 ms apart; `ipi_count > reached list` on all samples is confirmed. This does not detect this rootkit's `port_hiding`, which decrements `ipi_count` to match the removed entries. |
+| Syscall integrity | Patched `sysent[]` slots | `kvm_openfiles()`/`kvm_nlist()` resolve `sysent` and each original symbol. For syscall number `n`, read `sysent_base + n * sizeof(struct sysent)` and compare `sy_call` with the original symbol address. The 26 checked slots are `exit`, `getdirentries`, `fstatfs`, `__sysctl`, `__sysctlbyname`, `execve`, `fexecve`, `open`, `openat`, `read`, `write`, `ptrace`, `kldload`, `kldunload`, `kldstat`, `kldnext`, `setuid`, `seteuid`, `bind`, `accept`, `connect`, `recvfrom`, `recvmsg`, `fstatat`, `access`, and `kill`. |
+| Persistence artifacts | Rootkit-named paths, binary strings and startup configuration | `persistence_detector` checks known paths including `/boot/modules/rootkit.ko`, `/boot/modules/hiding.ko`, `/usr/local/bin/revshell`, `/usr/local/bin/rklog`, `/dev/rootkit`, and `/etc/rootkit_remote_ip`; scans startup/config files including `/etc/rc.local`, `/etc/rc.conf`, `/etc/rc.conf.local`, and `/boot/loader.conf`, plus cron/periodic/rc directories. It strips comments and scores suspicious names, content, and paths. A high-confidence hit contributes 10 points (the verdict threshold). The observed `p:10` can come from `lstat()` existence checks on known suspicious paths such as `/usr/local/bin/revshell`; it does not require reading configuration or module paths blocked by rootkit hooks. |
+| Cross-view/process audit | Disk/runtime/listing discrepancies, hidden processes and processless sockets | `detect.sh` compares `kld_list` entries and `.ko` files in `/boot/modules` or `/boot/kernel` against `kldstat -n/-m`, checks `kldstat -v` for loaded modules outside boot directories, and flags `sockstat -4` rows whose `USER` field is `?` (sockstat's placeholder for a socket without an owning process). `process_detector` compares process-list, per-PID query, signal, and file-table views and scores suspicious process names or inconsistent visibility. |
+
+`./detect` adds confirmed findings at 10 points each and suspect findings at 1 point; persistence, process, and syscall checkers contribute their own weighted scores. The overall threshold is 10, and any checker reporting a finding at its own high-confidence threshold also makes the verdict positive.
+
+Recorded FreeBSD 14.5 measurements (`kern.osreldate=1405000`):
+
+| Scenario | Score / evidence | Verdict |
+|---|---:|---|
+| Clean host | 1 (`m:1`) | clean |
+| Rootkit loaded, idle | 21 (`p:10`, `s:11`) | rootkit suspected |
+| Rootkit loaded after remote shell | 23 (`p:10`, `pr:1`, `s:11`, `m:1`) | rootkit suspected |
+| `hooktest.ko`, 16 KB unlinked executable mapping | confirmed mapping at `0xffffffff83000000` | confirmed |
+
+Legend: `p` = persistence, `pr` = process, `s` = syscall hooks, `m` = module/socket bookkeeping suspect. The `m:1` contribution is a low-confidence userland finding, such as a `sockstat -4` row with `USER` set to `?` for a processless socket; its presence varied between runs with the observed sockets and does not itself establish compromise.
+
+## 8. Design decisions and justification
+
+### Rootkit
+
+| Decision | Justification |
+|---|---|
+| Syscall-boundary hiding | Avoids undocumented static kernel structures and leaves kernel lists and module text intact. Original syscalls and all patched slots are restored on unload. |
+| Hook `kld*` and `mod*` | Closes both module-list and bare-name lookup paths used by `kldstat -m`. |
+| Filter process views instead of unlinking | Avoids corrupting `allproc`, PID-hash, lock order, and process-exit bookkeeping. |
+| Decrement `ipi_count` when removing a TCP PCB | Keeps the table count consistent with the list and avoids stale-counter corruption; consequently, the detector's counter check does not flag this implementation. |
+| Kernel capture; userland transport | Keeps ring/device handling in the kernel while isolating retries, DNS, and large spooling outside kernel memory. |
+| TTY/PTY type filtering | Captures arbitrary SSH/`su` descriptors and excludes pipes/files; noise-process and size gates reduce ring flooding. |
+| Load last; unhide before unload | Prevents hiding hooks from blocking setup or teardown. Daemons are stopped and allowed to exit before `destroy_dev()`; otherwise outstanding device references can make unload wait while holding the linker lock. |
+| Retry `/dev/rootkit` for up to two minutes | `revshell` can be launched as startup progresses; retrying tolerates device-creation or startup-order races instead of exiting after one failed open. |
+| No `kern.rootkit.*` sysctls or successful-unload banner | Avoids simple sysctl/dmesg string signatures; load failure diagnostics remain available. |
+| Collector accepts peers by default | NAT and QEMU slirp can rewrite source addresses; optional `-f` strict matching is available when source-IP identity is reliable. |
+
+### Detector
+
+| Decision | Justification |
+|---|---|
+| Kernel module plus userland checkers | Userland enumeration can be filtered; kernel structure reads and libkvm preserve independent ground truth. |
+| Execute scans on demand | `kernel_map` is write-locked during `MOD_LOAD`, so a scan there can deadlock `kldload`. |
+| Match linker ranges before mapping census | Avoids false positives for normal live modules and provides lock-order consistency with module loads. The kernel ELF mapping begins about 2 MB below `linker_kernel_file->address`, which starts at text and whose `size` does not cover the full mapping; use overlap, not containment, to exclude the kernel image's ELF head. The scan is capped at 64 MB after the image to bound work to the expected KLD allocation area and avoid unrelated high KVA. |
+| Treat mapped-module census as a limited signal | This rootkit filters module queries but leaves its `linker_file` entry intact, so its executable mapping is claimed and is not reported as unlinked code. |
+| Compare PCB count to reachable list | Detects stale accounting after PCB unlinking; it does not flag this rootkit's `port_hiding`, which keeps `ipi_count` consistent. |
+| Full PCB iterator and 3 samples | Safe SMR/lock-released traversal plus repeated samples avoids transient connection-race false positives. |
+| Confirmed/suspect scoring with threshold 10 | Ground-truth findings can convict confidently; heuristics remain capped below the threshold rather than being self-contradictory. |
